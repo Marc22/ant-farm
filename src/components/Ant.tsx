@@ -14,6 +14,7 @@ type Props = {
   onPickupGrain?: (tunnelX: number, tunnelY: number) => void
   onDepositGrain?: (surfaceX: number, surfaceY: number) => void
   getCarriedCount?: () => number
+  forceEnterTunnel?: number  // Increment to force ant to enter tunnel
 }
 
 export default function Ant({ 
@@ -29,7 +30,8 @@ export default function Ant({
   getTunnelPoints,
   onPickupGrain,
   onDepositGrain,
-  getCarriedCount
+  getCarriedCount,
+  forceEnterTunnel
 }: Props) {
   const [pos, setPos] = useState({ x: 0, y: 0, angle: 0, legSwing: 0 })
   const [isDigging, setIsDigging] = useState(false)
@@ -46,30 +48,46 @@ export default function Ant({
   
   // Tunnel navigation state
   type AntMode = 'surface' | 'descending' | 'at-grain' | 'ascending' | 'depositing'
-  const [mode, setMode] = useState<AntMode>('surface')
+  const [mode, setModeState] = useState<AntMode>('surface')
+  const modeRef = useRef<AntMode>('surface')
+  const setMode = (m: AntMode) => {
+    modeRef.current = m
+    setModeState(m)
+  }
   const tunnelPathRef = useRef<Array<{ x: number; y: number }>>([])
   const tunnelProgressRef = useRef(0)
   const tunnelEntryRef = useRef<{ x: number; y: number } | null>(null)
+  
+  // Use refs to always get the latest callbacks
+  const getTunnelPointsRef = useRef(getTunnelPoints)
+  const onPickupGrainRef = useRef(onPickupGrain)
+  const onDepositGrainRef = useRef(onDepositGrain)
+  const getCarriedCountRef = useRef(getCarriedCount)
+  
+  useEffect(() => {
+    getTunnelPointsRef.current = getTunnelPoints
+    onPickupGrainRef.current = onPickupGrain
+    onDepositGrainRef.current = onDepositGrain
+    getCarriedCountRef.current = getCarriedCount
+  })
 
   useEffect(() => {
     const path = document.getElementById(pathId) as SVGPathElement | null
     if (!path) return
-    const length = path.getTotalLength()
-    lengthRef.current = length
+    lengthRef.current = path.getTotalLength()
 
     // Decision making: check for tunnel opportunities periodically
     const checkForTunnel = () => {
-      if (mode === 'surface' && !isDiggingRef.current && getTunnelPoints) {
-        const tunnels = getTunnelPoints()
-        try { console.debug('[Ant] Checking tunnels:', tunnels.length, 'points available, mode:', mode) } catch(e) {}
-        if (tunnels.length >= 2) {
+      if (modeRef.current === 'surface' && !isDiggingRef.current && getTunnelPointsRef.current) {
+        const tunnels = getTunnelPointsRef.current()
+        try { console.debug('[Ant] Checking tunnels:', tunnels ? tunnels.length : 0, 'points available, mode:', modeRef.current) } catch(e) {}
+        if (tunnels && tunnels.length >= 2) {
           // Found a tunnel! Check if we're close to entry
           const surfacePt = path.getPointAtLength(curRef.current)
           const nearbyEntry = tunnels[0] // Use first point as entry
           const distance = Math.abs(nearbyEntry.x - surfacePt.x)
           try { console.debug('[Ant] Distance to tunnel:', distance, 'px, entry at', nearbyEntry) } catch(e) {}
-          if (distance < 50 && Math.random() < 0.5) {  // INCREASED to 50% chance
-            // Close enough - start descent
+          if (distance < 50 && Math.random() < 0.5) {
             tunnelEntryRef.current = { x: nearbyEntry.x, y: nearbyEntry.y }
             tunnelPathRef.current = tunnels
             tunnelProgressRef.current = 0
@@ -85,9 +103,8 @@ export default function Ant({
 
     // Random surface behavior
     let stopped = false
-    let justFinishedDigging = false
     const scheduleRandom = () => {
-      if (mode !== 'surface') {
+      if (modeRef.current !== 'surface') {
         setTimeout(scheduleRandom, 1000)
         return
       }
@@ -105,34 +122,37 @@ export default function Ant({
         onDig({ x: pt.x, y: pt.y })
         setIsDigging(true)
         isDiggingRef.current = true
-        justFinishedDigging = false
         const digTime = 1200 + Math.random() * 1800
-        setTimeout(() => { 
+        setTimeout(() => {
           movingRef.current = true
           setIsDigging(false)
           isDiggingRef.current = false
-          justFinishedDigging = true  // Mark that we just finished
           try { console.debug('[Ant] end dig - will enter tunnel when ready') } catch (e) {}
           if (typeof onDigEnd === 'function') onDigEnd()
-          
+
           // Wait for tunnel to be complete before entering
           const checkTunnelReady = () => {
-            if (getTunnelPoints) {
-              const tunnels = getTunnelPoints()
-              try { console.debug('[Ant] Checking if tunnel ready:', tunnels.length, 'points') } catch(e) {}
-              if (tunnels.length >= 2) {
-                try { console.debug('[Ant] Entering freshly dug tunnel with', tunnels.length, 'points at', new Date().toISOString()) } catch(e) {}
-                tunnelEntryRef.current = { x: tunnels[0].x, y: tunnels[0].y }
-                tunnelPathRef.current = tunnels
-                tunnelProgressRef.current = 0
-                setMode('descending')
-                movingRef.current = true
-                justFinishedDigging = false
-              } else {
-                // Tunnel not ready yet, check again
-                try { console.debug('[Ant] Tunnel not ready, checking again in 300ms') } catch(e) {}
-                setTimeout(checkTunnelReady, 300)
-              }
+            console.log('[Ant] checkTunnelReady called, modeRef:', modeRef.current)
+            if (!getTunnelPointsRef.current) {
+              console.log('[Ant] No getTunnelPointsRef, retrying...')
+              setTimeout(checkTunnelReady, 300)
+              return
+            }
+            const tunnels = getTunnelPointsRef.current()
+            console.log('[Ant] Got tunnels:', tunnels ? tunnels.length : 0, 'points')
+            if (tunnels && tunnels.length >= 2) {
+              console.log('[Ant] ENTERING TUNNEL NOW - setting mode to descending')
+              tunnelEntryRef.current = { x: tunnels[0].x, y: tunnels[0].y }
+              tunnelPathRef.current = tunnels
+              tunnelProgressRef.current = 0
+              modeRef.current = 'descending'  // Set ref directly first
+              setMode('descending')           // Then update state
+              movingRef.current = true
+              console.log('[Ant] Mode is now:', modeRef.current, 'tunnelPath has', tunnelPathRef.current.length, 'points')
+            } else {
+              // Tunnel not ready yet, check again
+              console.log('[Ant] Tunnel not ready, retrying in 300ms')
+              setTimeout(checkTunnelReady, 300)
             }
           }
           // Start checking after a brief delay
@@ -150,16 +170,15 @@ export default function Ant({
       const dt = (now - lastRef.current) / 1000
       lastRef.current = now
 
-      // Debug: log mode every 60 frames when not surface
-      if (typeof window !== 'undefined' && (window as any).frameCount === undefined) (window as any).frameCount = 0
+      // Debug: log mode every 60 frames
       if (typeof window !== 'undefined') {
-        (window as any).frameCount++
-        if ((window as any).frameCount % 60 === 0 && mode !== 'surface') {
-          try { console.debug('[Ant RAF] mode:', mode, 'tunnelPath length:', tunnelPathRef.current.length, 'progress:', tunnelProgressRef.current) } catch(e) {}
+        (window as any).frameCount = ((window as any).frameCount || 0) + 1
+        if ((window as any).frameCount % 120 === 0) {
+          console.log('[Ant step] mode:', modeRef.current, 'tunnelPath:', tunnelPathRef.current.length, 'progress:', tunnelProgressRef.current.toFixed(2))
         }
       }
 
-      if (mode === 'surface') {
+      if (modeRef.current === 'surface') {
         // Normal surface walking
         if (movingRef.current) {
           curRef.current += dirRef.current * speedRef.current * dt
@@ -177,27 +196,27 @@ export default function Ant({
           setPos({ x: p.x, y: yWithDive, angle, legSwing: swing })
           if (typeof onUpdatePos === 'function') onUpdatePos({ x: p.x, y: yWithDive, angle, legSwing: swing, mode: 'surface' })
         }
-      } else if (mode === 'descending' || mode === 'ascending') {
+      } else if (modeRef.current === 'descending' || modeRef.current === 'ascending') {
         // Navigate along tunnel path
-        const isDescending = mode === 'descending'
+        const isDescending = modeRef.current === 'descending'
         const targetSpeed = initialSpeed * 0.6 // Slower in tunnel
         tunnelProgressRef.current += targetSpeed * dt * (isDescending ? 1 : -1)
-        
+
         const pathLen = tunnelPathRef.current.length
         if (pathLen < 2) {
           try { console.debug('[Ant] Tunnel path too short, returning to surface') } catch(e) {}
           setMode('surface')
           return
         }
-        
+
         const maxProgress = pathLen - 1
         if (isDescending && tunnelProgressRef.current >= maxProgress) {
           // Reached deepest point - pick up grain
           tunnelProgressRef.current = maxProgress
           const grainPt = tunnelPathRef.current[pathLen - 1]
           try { console.debug('[Ant] Reached deepest point at', grainPt) } catch(e) {}
-          if (onPickupGrain) {
-            onPickupGrain(grainPt.x, grainPt.y)
+          if (onPickupGrainRef.current) {
+            onPickupGrainRef.current(grainPt.x, grainPt.y)
             setCarryingGrain(true)
           }
           setMode('at-grain')
@@ -212,17 +231,26 @@ export default function Ant({
           const surfacePt = tunnelPathRef.current[0]
           try { console.debug('[Ant] Back at surface, depositing') } catch(e) {}
           setTimeout(() => {
-            if (onDepositGrain) {
-              onDepositGrain(surfacePt.x, surfacePt.y)
+            if (onDepositGrainRef.current) {
+              onDepositGrainRef.current(surfacePt.x, surfacePt.y)
               setCarryingGrain(false)
             }
             try { console.debug('[Ant] Deposited grain, checking if more grains in tunnel') } catch(e) {}
-            
+
             // Check if there are more grains in this tunnel
-            const moreGrains = getCarriedCount ? getCarriedCount() : 0
+            const moreGrains = getCarriedCountRef.current ? getCarriedCountRef.current() : 0
             if (moreGrains > 0 && tunnelPathRef.current.length >= 2) {
               // More grains available - go back down immediately!
               try { console.debug('[Ant] More grains available (', moreGrains, '), going back down!') } catch(e) {}
+              
+              // Re-fetch the tunnel path in case it was extended
+              if (getTunnelPointsRef.current) {
+                const latestPath = getTunnelPointsRef.current()
+                if (latestPath && latestPath.length >= 2) {
+                  tunnelPathRef.current = latestPath
+                }
+              }
+              
               tunnelProgressRef.current = 0
               setMode('descending')
               movingRef.current = true
@@ -235,7 +263,7 @@ export default function Ant({
             }
           }, 300)
         }
-        
+
         // Interpolate position along tunnel
         const idx = Math.floor(tunnelProgressRef.current)
         const frac = tunnelProgressRef.current - idx
@@ -246,9 +274,9 @@ export default function Ant({
         const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI * (isDescending ? 1 : -1)
         const swing = Math.sin(now / 160 * (targetSpeed / 8)) * 1.0
         setPos({ x, y, angle, legSwing: swing })
-        if (typeof onUpdatePos === 'function') onUpdatePos({ x, y, angle, legSwing: swing, mode })
+        if (typeof onUpdatePos === 'function') onUpdatePos({ x, y, angle, legSwing: swing, mode: modeRef.current })
       }
-      
+
       rafRef.current = requestAnimationFrame(step)
     }
 
@@ -257,7 +285,7 @@ export default function Ant({
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
     }
-  }, [pathId, initialSpeed, mode])
+  }, [pathId, initialSpeed])
 
   // respond to resetSignal: reset position
   useEffect(() => {
@@ -271,6 +299,26 @@ export default function Ant({
       setPos({ x: 0, y: 0, angle: 0, legSwing: 0 })
     }
   }, [resetSignal])
+
+  // respond to forceEnterTunnel: immediately enter tunnel if available
+  useEffect(() => {
+    if (typeof forceEnterTunnel === 'number' && forceEnterTunnel > 0) {
+      console.log('[Ant] forceEnterTunnel triggered:', forceEnterTunnel)
+      if (getTunnelPointsRef.current) {
+        const tunnels = getTunnelPointsRef.current()
+        console.log('[Ant] Force enter - got', tunnels ? tunnels.length : 0, 'tunnel points')
+        if (tunnels && tunnels.length >= 2) {
+          console.log('[Ant] FORCE ENTERING TUNNEL')
+          tunnelEntryRef.current = { x: tunnels[0].x, y: tunnels[0].y }
+          tunnelPathRef.current = tunnels
+          tunnelProgressRef.current = 0
+          modeRef.current = 'descending'
+          setMode('descending')
+          movingRef.current = true
+        }
+      }
+    }
+  }, [forceEnterTunnel])
 
   // Render a more side-view ant: three body segments and animated legs
   const { legSwing } = pos

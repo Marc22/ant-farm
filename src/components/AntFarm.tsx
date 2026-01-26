@@ -16,6 +16,7 @@ export default function AntFarm(): JSX.Element {
   const [isDigging, setIsDigging] = React.useState(false)
   const [antMode, setAntMode] = React.useState<string>('surface')
   const [resetSignal, setResetSignal] = React.useState(0)
+  const [forceEnterTunnel, setForceEnterTunnel] = React.useState(0)
 
   function handleDig(pt: { x: number; y: number }) {
     try { console.debug('[AntFarm] handleDig called', pt) } catch (e) {}
@@ -128,6 +129,43 @@ export default function AntFarm(): JSX.Element {
       setTunnelGrains(tg => tg.filter((_, i) => i !== grainIndex))
       carriedRef.current.push({ x: grain.x, y: grain.y, r: grain.r })
       try { console.debug('[AntFarm] Picked up grain! Remaining in tunnels:', tunnelGrains.length - 1) } catch(e) {}
+      
+      // EXTEND TUNNEL: Make tunnel longer each time a grain is picked up
+      if (tunnelPaths.length > 0) {
+        const latestIdx = tunnelPaths.length - 1
+        const latest = tunnelPaths[latestIdx]
+        if (latest.points.length >= 2) {
+          const lastPt = latest.points[latest.points.length - 1]
+          const prevPt = latest.points[latest.points.length - 2]
+          // Extend in same direction with slight variation
+          const dx = lastPt.x - prevPt.x
+          const dy = lastPt.y - prevPt.y
+          const newX = lastPt.x + dx * 0.6 + (Math.random() * 6 - 3)
+          const newY = Math.min(sandTop + 160, lastPt.y + Math.abs(dy) * 0.6 + 4 + Math.random() * 4)
+          const newPt = { x: newX, y: newY }
+          
+          // Add new point to tunnel
+          setTunnelPaths(tp => tp.map((t, i) => 
+            i === latestIdx 
+              ? { ...t, points: [...t.points, newPt] }
+              : t
+          ))
+          
+          // Add a hole for the new tunnel segment
+          setHoles(h => [...h, { x: newX, y: newY, r: latest.r * 0.9 }])
+          
+          // Add new grains at the extended end
+          const newGrainCount = 2 + Math.floor(Math.random() * 3)
+          const newGrains = Array.from({ length: newGrainCount }, () => ({
+            x: newX + (Math.random() * 6 - 3),
+            y: newY + (Math.random() * 6 - 3),
+            r: 1.6 + Math.random() * 2.4,
+            tunnelId: latestIdx
+          }))
+          setTunnelGrains(tg => [...tg, ...newGrains])
+          try { console.debug('[AntFarm] Extended tunnel by 1 point, added', newGrainCount, 'new grains') } catch(e) {}
+        }
+      }
     } else {
       try { console.debug('[AntFarm] No grain found near', tunnelX, tunnelY, '- total grains:', tunnelGrains.length) } catch(e) {}
     }
@@ -152,7 +190,9 @@ export default function AntFarm(): JSX.Element {
   }
 
   function getCarriedCount(): number {
-    return carriedRef.current.length
+    // Return the number of grains remaining in tunnels (not the carried buffer)
+    // This tells the ant how many more trips are needed
+    return tunnelGrains.length
   }
 
   function handleReset() {
@@ -173,6 +213,7 @@ export default function AntFarm(): JSX.Element {
     let raf: number | null = null
     let last: number | null = null
     const g = 900 // px/s^2
+    const maxSlope = 0.8 // max height difference between adjacent columns before grain rolls
 
     const step = (now: number) => {
       if (last == null) last = now
@@ -194,12 +235,39 @@ export default function AntFarm(): JSX.Element {
           const columnHeight = heightMapRef.current[bin] || 0
           const targetY = sandTop - columnHeight - p.r * 0.5
           if (p.y >= targetY) {
-            // settle into bin
-            p.y = targetY
-            p.yv = 0
-            p.settled = true
-            // increase heightmap
-            heightMapRef.current[bin] = (heightMapRef.current[bin] || 0) + p.r * 0.6
+            // Check if grain should roll to a lower adjacent column (realistic hill formation)
+            const leftBin = Math.max(0, bin - 1)
+            const rightBin = Math.min(heightMapRef.current.length - 1, bin + 1)
+            const leftHeight = heightMapRef.current[leftBin] || 0
+            const rightHeight = heightMapRef.current[rightBin] || 0
+            
+            // Find the lowest neighbor
+            let rollTo = -1
+            let lowestHeight = columnHeight
+            if (leftHeight < lowestHeight - maxSlope * p.r) {
+              lowestHeight = leftHeight
+              rollTo = leftBin
+            }
+            if (rightHeight < lowestHeight - maxSlope * p.r) {
+              lowestHeight = rightHeight
+              rollTo = rightBin
+            }
+            
+            if (rollTo >= 0 && Math.random() < 0.7) {
+              // Roll to the lower column
+              p.x = sandLeft + rollTo + (Math.random() * 2 - 1)
+              p.y = sandTop - lowestHeight - p.r * 0.5
+              p.yv = 0
+              p.settled = true
+              heightMapRef.current[rollTo] = (heightMapRef.current[rollTo] || 0) + p.r * 0.5
+            } else {
+              // Settle in current column
+              p.y = targetY
+              p.yv = 0
+              p.settled = true
+              // increase heightmap
+              heightMapRef.current[bin] = (heightMapRef.current[bin] || 0) + p.r * 0.6
+            }
           }
         }
         return next
@@ -237,22 +305,19 @@ export default function AntFarm(): JSX.Element {
       
       <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
         <button onClick={() => { 
-          try { console.debug('[AntFarm] force dig clicked') } catch (e) {} 
+          console.log('[AntFarm] force dig clicked')
           const pt = antPos ? { x: antPos.x, y: antPos.y } : { x: (sandLeft + sandRight) / 2, y: sandTop }
-          handleDigStart(pt) 
+          handleDigStart(pt)
+          // After tunnel is created (allow time for async creation), force ant to enter
+          setTimeout(() => {
+            console.log('[AntFarm] Triggering forceEnterTunnel')
+            setForceEnterTunnel(f => f + 1)
+          }, 3000)  // Wait for tunnel to be fully created
         }} style={{ marginBottom: 8 }}>Force Dig</button>
         <button onClick={() => {
-          try { console.debug('[AntFarm] Force Enter Tunnel clicked') } catch (e) {}
-          const tunnels = getTunnelPoints()
-          console.log('Available tunnel points:', tunnels)
-          if (tunnels.length >= 2) {
-            // Trigger ant to enter tunnel by simulating the callback
-            // We need to get a reference to the ant - let's add a test helper
-            alert(`Tunnel available with ${tunnels.length} points. Check console for details. Ant should enter on next check cycle.`)
-          } else {
-            alert('No tunnels available yet. Dig first!')
-          }
-        }} style={{ marginBottom: 8 }}>Check Tunnels</button>
+          console.log('[AntFarm] Force Enter Tunnel clicked')
+          setForceEnterTunnel(f => f + 1)
+        }} style={{ marginBottom: 8 }}>Enter Tunnel</button>
         <button onClick={handleReset} style={{ marginBottom: 8 }}>Reset</button>
       </div>
       <div className="antfarm-root" role="img" aria-label="Ant farm">
@@ -369,6 +434,7 @@ export default function AntFarm(): JSX.Element {
             onPickupGrain={handlePickupGrain}
             onDepositGrain={handleDepositGrain}
             getCarriedCount={getCarriedCount}
+            forceEnterTunnel={forceEnterTunnel}
           />
           {/* render carried grains attached to ant while digging */}
           {antPos && isDigging && carriedRef.current.length > 0 && (

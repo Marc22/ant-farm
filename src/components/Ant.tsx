@@ -41,7 +41,7 @@ export default function Ant({
   const dirRef = useRef(1)
   const speedRef = useRef(initialSpeed)
   const lengthRef = useRef(0)
-  const curRef = useRef(0) // current distance along path
+  const curRef = useRef(Math.random() * 100) // Start at random position along path
   const rafRef = useRef<number | null>(null)
   const lastRef = useRef<number | null>(null)
   const diveOffsetRef = useRef(0)
@@ -214,16 +214,27 @@ export default function Ant({
           // Reached deepest point - pick up grain
           tunnelProgressRef.current = maxProgress
           const grainPt = tunnelPathRef.current[pathLen - 1]
-          try { console.debug('[Ant] Reached deepest point at', grainPt) } catch(e) {}
+          console.log('[Ant] Reached deepest point at', grainPt, 'tunnel length:', pathLen)
+          
+          // Check if we're in a large room (tunnel is long)
+          const isInRoom = pathLen >= 15
+          
           if (onPickupGrainRef.current) {
             onPickupGrainRef.current(grainPt.x, grainPt.y)
             setCarryingGrain(true)
           }
           setMode('at-grain')
+          
+          // If in a room, rest longer before ascending
+          const restTime = isInRoom ? 1200 + Math.random() * 800 : 400
+          if (isInRoom) {
+            console.log('[Ant] Resting in room for', Math.round(restTime), 'ms')
+          }
+          
           setTimeout(() => {
-            try { console.debug('[Ant] Starting ascent') } catch(e) {}
+            console.log('[Ant] Starting ascent')
             setMode('ascending')
-          }, 400)
+          }, restTime)
         } else if (!isDescending && tunnelProgressRef.current <= 0) {
           // Back at surface - deposit
           tunnelProgressRef.current = 0
@@ -348,7 +359,7 @@ export default function Ant({
       
       {/* grain carried in mandibles when carryingGrain is true */}
       {carryingGrain && (
-        <ellipse cx="13" cy="0" rx="2.5" ry="1.5" fill="#caa97a" opacity={0.95} />
+        <ellipse cx="12" cy="-0.5" rx="2" ry="1.2" fill="#caa97a" opacity={0.98} stroke="#b8945a" strokeWidth="0.3" />
       )}
     </g>
   )

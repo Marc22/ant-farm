@@ -1,0 +1,60 @@
+.antfarm-root {
+  --farm-green: #2f6f33;
+  max-width: 980px; /* larger display */
+  margin-top: 18px;
+  background: linear-gradient(180deg, #f6fff7 0%, #f8fafc 100%);
+  padding: 16px;
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.08);
+}
+.antfarm-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.antfarm-root {
+  --farm-green: #0b9440; /* uncle-milton-like green */
+  max-width: 1103px; /* increased 10% from current */
+  margin-top: 18px;
+  padding: 12px;
+  border-radius: 12px;
+  background: transparent;
+  box-shadow: 0 10px 30px rgba(11, 22, 16, 0.08);
+}
+.antfarm-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.frame {
+  fill: none; /* plastic frame is colored stroke */
+  stroke: var(--farm-green);
+  stroke-width: 19; /* increased ~10% */
+}
+.glass {
+  stroke-linecap: round;
+}
+.sand {
+  fill: #e5cfa3; /* base sand color */
+}
+.sand-grain circle {
+  mix-blend-mode: multiply;
+}
+.structure-fill {
+  fill: var(--farm-green);
+}
+.horizon-silhouette {
+  fill: var(--farm-green);
+}
+
+/* style for the walking ant */
+#ant-1 circle {
+  fill: #231f20;
+  stroke: rgba(0,0,0,0.2);
+  stroke-width: 0.5;
+}
+
+/* responsive tweaks */
+@media (max-width: 480px) {
+  .antfarm-root { padding: 8px; }
+}

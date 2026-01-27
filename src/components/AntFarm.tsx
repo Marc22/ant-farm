@@ -19,11 +19,17 @@ export default function AntFarm(): JSX.Element {
   const [forceEnterTunnel, setForceEnterTunnel] = React.useState(0)
   const tunnelRoomThresholdsRef = React.useRef<Map<number, number>>(new Map())  // tunnelId -> threshold length for room
   const tunnelHasRoomRef = React.useRef<Set<number>>(new Set())  // tunnelIds that already have a room built
-  const [ants, setAnts] = React.useState<Array<{ id: number; speed: number; color: string }>>([
-    { id: 0, speed: 14, color: '#231f20' }  // Starting ant
+  const [ants, setAnts] = React.useState<Array<{ id: number; speed: number; color: string; tunnelId?: number; dead?: boolean; bornAt?: number }>>([
+    { id: 0, speed: 14, color: '#231f20', bornAt: Date.now() },  // Starting ant
+    { id: 1, speed: 12, color: '#8B4513', bornAt: Date.now() },  // Second ant
+    { id: 2, speed: 16, color: '#654321', bornAt: Date.now() }   // Third ant
   ])
-  const nextAntIdRef = React.useRef(1)
+  const nextAntIdRef = React.useRef(3)  // Start at 3 since we have 3 ants
   const nextTunnelIdRef = React.useRef(0)
+  const antTunnelAssignmentsRef = React.useRef<Map<number, number>>(new Map())  // antId -> tunnelId
+  const tunnelAntCountsRef = React.useRef<Map<number, number>>(new Map())  // tunnelId -> count of ants
+  const MAX_ANTS_PER_TUNNEL = 2  // Maximum ants allowed in one tunnel
+  const ANT_LIFESPAN_MS = 45000 + Math.random() * 30000  // 45-75 seconds
 
   function handleDig(pt: { x: number; y: number }) {
     try { console.debug('[AntFarm] handleDig called', pt) } catch (e) {}
@@ -81,8 +87,8 @@ export default function AntFarm(): JSX.Element {
       }, delay)
     }
     
-    // Return the total time so caller knows when tunnel is complete
-    return totalTunnelTime
+    // Return the tunnel id and total time so caller knows when tunnel is complete
+    return { tunnelId, totalTunnelTime }
   }
 
   // ant position callback to show carried grains visually and to deposit from ant location
@@ -92,16 +98,26 @@ export default function AntFarm(): JSX.Element {
   }
 
   // ant digging start/stop handlers to show carried grains attached to ant
-  function handleDigStart(pt: { x: number; y: number }) {
+  function handleDigStart(pt: { x: number; y: number }, antId?: number) {
     // mark ant as digging (visual only)
-    try { console.debug('[AntFarm] digStart', pt) } catch (e) {}
+    try { console.debug('[AntFarm] digStart at', pt, '- ant should be visible at this location, by ant', antId) } catch (e) {}
     setAntPos(prev => ({ x: pt.x, y: pt.y, digging: true }))
     setIsDigging(true)
-    // call existing logic to make a tunnel and get the time it takes
-    const tunnelCompleteTime = handleDig(pt)
+    // call existing logic to make a tunnel and get the time it takes and id
+    const result = handleDig(pt)
+    const tunnelCompleteTime = result.totalTunnelTime
+    const tunnelId = result.tunnelId
+    // If we have an antId, immediately assign this ant to the tunnel so it has priority
+    if (typeof antId === 'number') {
+      antTunnelAssignmentsRef.current.set(antId, tunnelId)
+      const newCount = (tunnelAntCountsRef.current.get(tunnelId) || 0) + 1
+      tunnelAntCountsRef.current.set(tunnelId, newCount)
+      console.log('[AntFarm] Assigned ant', antId, 'to newly created tunnel', tunnelId)
+    }
     // Store this so handleDigEndFromAnt knows the tunnel is ready
     ;(window as any).lastTunnelCompleteTime = Date.now() + tunnelCompleteTime
-    try { console.debug('[AntFarm] Tunnel will be complete at', new Date((window as any).lastTunnelCompleteTime).toISOString()) } catch(e) {}
+    try { console.debug('[AntFarm] Tunnel will be complete in', tunnelCompleteTime, 'ms (id', tunnelId, ')') } catch(e) {}
+    return { tunnelId, tunnelCompleteTime }
   }
 
   function handleDigEndFromAnt() {
@@ -117,23 +133,47 @@ export default function AntFarm(): JSX.Element {
   }
 
   // New callbacks for tunnel navigation
-  function getTunnelPoints(): Array<{ x: number; y: number }> {
-    // Return a random tunnel path that has grains available
+  function getTunnelPoints(antId: number, skipOvercrowdCheck?: boolean): Array<{ x: number; y: number }> {
+    // Return a random tunnel path that has grains available and is not overcrowded
     if (tunnelPaths.length === 0) return []
     
     // Find tunnels that have grains
     const tunnelIdsWithGrains = new Set(tunnelGrains.map(g => g.tunnelId))
-    const availableTunnels = tunnelPaths.filter(t => tunnelIdsWithGrains.has(t.id))
+    const availableTunnels = tunnelPaths.filter(t => {
+      const hasGrains = tunnelIdsWithGrains.has(t.id)
+      if (!hasGrains) return false
+      
+      // Skip overcrowd check if this ant just dug the tunnel
+      if (skipOvercrowdCheck) return true
+      
+      const antCount = tunnelAntCountsRef.current.get(t.id) || 0
+      const notOvercrowded = antCount < MAX_ANTS_PER_TUNNEL
+      return notOvercrowded
+    })
 
     if (availableTunnels.length === 0) {
-      // No tunnels with grains, return any tunnel
-      const randomIdx = Math.floor(Math.random() * tunnelPaths.length)
-      return tunnelPaths[randomIdx].points
+      // No available tunnels - return empty to force ant to dig new tunnel
+      console.log('[AntFarm] No available tunnels for ant', antId, '- all are overcrowded or empty')
+      return []
     }
 
-    // Pick a random tunnel that has grains
+    // Pick a random tunnel that has grains and isn't overcrowded
     const chosen = availableTunnels[Math.floor(Math.random() * availableTunnels.length)]
-    console.log('[AntFarm] getTunnelPoints returning tunnel', chosen.id, 'with', chosen.points.length, 'points')
+    console.log('[AntFarm] getTunnelPoints returning tunnel', chosen.id, 'with', chosen.points.length, 'points for ant', antId)
+    
+    // Assign this ant to the chosen tunnel and update counts
+    const oldTunnelId = antTunnelAssignmentsRef.current.get(antId)
+    if (oldTunnelId !== undefined && oldTunnelId !== chosen.id) {
+      // Remove from old tunnel
+      const oldCount = tunnelAntCountsRef.current.get(oldTunnelId) || 0
+      tunnelAntCountsRef.current.set(oldTunnelId, Math.max(0, oldCount - 1))
+    }
+    
+    antTunnelAssignmentsRef.current.set(antId, chosen.id)
+    const newCount = (tunnelAntCountsRef.current.get(chosen.id) || 0) + 1
+    tunnelAntCountsRef.current.set(chosen.id, newCount)
+    console.log('[AntFarm] Tunnel', chosen.id, 'now has', newCount, 'ants')
+    
     return chosen.points
   }
 
@@ -293,6 +333,17 @@ export default function AntFarm(): JSX.Element {
     return tunnelGrains.length
   }
 
+  function handleAntLeaveTunnel(antId: number) {
+    // When ant leaves a tunnel, remove it from the tunnel assignment
+    const tunnelId = antTunnelAssignmentsRef.current.get(antId)
+    if (tunnelId !== undefined) {
+      const currentCount = tunnelAntCountsRef.current.get(tunnelId) || 0
+      tunnelAntCountsRef.current.set(tunnelId, Math.max(0, currentCount - 1))
+      antTunnelAssignmentsRef.current.delete(antId)
+      console.log('[AntFarm] Ant', antId, 'left tunnel', tunnelId, '- tunnel now has', Math.max(0, currentCount - 1), 'ants')
+    }
+  }
+
   function handleReset() {
     setHoles([])
     setTunnelPaths([])
@@ -303,12 +354,18 @@ export default function AntFarm(): JSX.Element {
     setResetSignal(s => s + 1)
     // reset height map
     heightMapRef.current = new Array(sandRight - sandLeft + 1).fill(0)
-    // Reset to one ant
-    setAnts([{ id: 0, speed: 14, color: '#231f20' }])
-    nextAntIdRef.current = 1
+    // Reset to three ants
+    setAnts([
+      { id: 0, speed: 14, color: '#231f20', bornAt: Date.now() },
+      { id: 1, speed: 12, color: '#8B4513', bornAt: Date.now() },
+      { id: 2, speed: 16, color: '#654321', bornAt: Date.now() }
+    ])
+    nextAntIdRef.current = 3
     nextTunnelIdRef.current = 0
     tunnelRoomThresholdsRef.current.clear()
     tunnelHasRoomRef.current.clear()
+    antTunnelAssignmentsRef.current.clear()
+    tunnelAntCountsRef.current.clear()
   }
 
   function addAnt() {
@@ -316,9 +373,38 @@ export default function AntFarm(): JSX.Element {
     const colors = ['#231f20', '#8B4513', '#654321', '#3d2817', '#5C4033']
     const color = colors[newId % colors.length]
     const speed = 12 + Math.random() * 6  // Random speed 12-18
-    setAnts(a => [...a, { id: newId, speed, color }])
+    setAnts(a => [...a, { id: newId, speed, color, bornAt: Date.now() }])
     console.log('[AntFarm] Added ant', newId, 'with speed', speed.toFixed(1), 'color', color)
   }
+
+  // Check for ant deaths periodically
+  React.useEffect(() => {
+    const checkDeaths = setInterval(() => {
+      const now = Date.now()
+      setAnts(currentAnts => currentAnts.map(ant => {
+        if (ant.dead) return ant
+        if (!ant.bornAt) return { ...ant, bornAt: now }
+        
+        const age = now - ant.bornAt
+        const lifespan = 45000 + (ant.id * 5000) % 30000  // Variable lifespan 45-75s per ant
+        
+        if (age > lifespan && Math.random() < 0.02) {  // 2% chance per check after lifespan
+          console.log('[AntFarm] Ant', ant.id, 'died at age', Math.round(age / 1000), 'seconds')
+          // Remove from tunnel assignment
+          const tunnelId = antTunnelAssignmentsRef.current.get(ant.id)
+          if (tunnelId !== undefined) {
+            const count = tunnelAntCountsRef.current.get(tunnelId) || 0
+            tunnelAntCountsRef.current.set(tunnelId, Math.max(0, count - 1))
+            antTunnelAssignmentsRef.current.delete(ant.id)
+          }
+          return { ...ant, dead: true }
+        }
+        return ant
+      }))
+    }, 1000)  // Check every second
+    
+    return () => clearInterval(checkDeaths)
+  }, [])
 
   // heightMap-based grain physics: grains fall and settle into columns to form hills
   const heightMapRef = React.useRef<number[]>(new Array(sandRight - sandLeft + 1).fill(0))
@@ -407,7 +493,7 @@ export default function AntFarm(): JSX.Element {
         zIndex: 1000,
         lineHeight: 1.5
       }}>
-        <div>Ants: {ants.length}</div>
+        <div>Ants: {ants.length} ({ants.filter(a => !a.dead).length} alive)</div>
         <div>Ant: {antPos ? `(${Math.round(antPos.x)}, ${Math.round(antPos.y)})` : 'N/A'}</div>
         <div>Mode: <strong>{antMode}</strong></div>
         <div>Active: {isDigging ? 'Digging' : (antMode === 'descending' || antMode === 'ascending' ? 'In Tunnel' : 'Walking')}</div>
@@ -415,13 +501,36 @@ export default function AntFarm(): JSX.Element {
         <div>In Tunnels: {tunnelGrains.length} grains</div>
         <div>Settled: {grains.filter(g => g.settled).length}/{grains.length}</div>
         <div>Tunnels: {tunnelPaths.length} paths, {holes.length} holes</div>
+        <div style={{marginTop: 4, borderTop: '1px solid #0f0', paddingTop: 4, fontSize: '10px'}}>
+          <div><strong>Ant Assignments:</strong></div>
+          {ants.map(a => {
+            const tunnelId = antTunnelAssignmentsRef.current.get(a.id)
+            return (
+              <div key={a.id}>
+                Ant{a.id}: {tunnelId !== undefined ? `T${tunnelId}` : 'none'}
+              </div>
+            )
+          })}
+        </div>
+        <div style={{marginTop: 4, borderTop: '1px solid #0f0', paddingTop: 4}}>
+          {tunnelPaths.map(tp => {
+            const antCount = tunnelAntCountsRef.current.get(tp.id) || 0
+            const grainCount = tunnelGrains.filter(g => g.tunnelId === tp.id).length
+            return (
+              <div key={tp.id} style={{fontSize: '10px'}}>
+                T{tp.id}: {antCount}/{MAX_ANTS_PER_TUNNEL} ants, {grainCount} grains
+              </div>
+            )
+          })}
+        </div>
       </div>
       
       <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
         <button onClick={() => { 
           console.log('[AntFarm] force dig clicked')
           const pt = antPos ? { x: antPos.x, y: antPos.y } : { x: (sandLeft + sandRight) / 2, y: sandTop }
-          handleDigStart(pt)
+          const digger = ants.find(a => !a.dead)?.id
+          handleDigStart(pt, digger)
           // After tunnel is created (allow time for async creation), force ant to enter
           setTimeout(() => {
             console.log('[AntFarm] Triggering forceEnterTunnel')
@@ -539,19 +648,22 @@ export default function AntFarm(): JSX.Element {
           {ants.map((ant) => (
             <Ant 
               key={ant.id}
+              antId={ant.id}
               pathId="horizonPathMotion" 
               initialSpeed={ant.speed} 
               scale={0.655} 
               color={ant.color}
+              isDead={ant.dead}
               onDig={handleDigStart} 
               resetSignal={resetSignal}
               onDigEnd={() => { handleDigEndFromAnt() }} 
               onUpdatePos={handleUpdatePos}
-              getTunnelPoints={getTunnelPoints}
+              getTunnelPoints={(skipOvercrowdCheck) => getTunnelPoints(ant.id, skipOvercrowdCheck)}
               onPickupGrain={handlePickupGrain}
               onDepositGrain={handleDepositGrain}
               getCarriedCount={getCarriedCount}
               forceEnterTunnel={forceEnterTunnel}
+              onLeaveTunnel={() => handleAntLeaveTunnel(ant.id)}
             />
           ))}
           {/* render carried grains attached to ant while digging */}

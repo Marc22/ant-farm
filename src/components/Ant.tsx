@@ -12,8 +12,8 @@ type Props = {
   getSurfaceY?: (x: number) => number
   onUpdatePos?: (p: { x: number; y: number; angle: number; legSwing: number; mode?: string }) => void
   onDigEnd?: () => void
-  getTunnelPoints?: (skipOvercrowdCheck?: boolean) => Array<{ x: number; y: number }>
-  onPickupGrain?: (tunnelX: number, tunnelY: number) => void
+  getTunnelPoints?: (antIdOrSkip?: number | boolean, skipOvercrowdCheck?: boolean) => Array<{ x: number; y: number }>
+  onPickupGrain?: (tunnelX: number, tunnelY: number, antId?: number) => void
   onDepositGrain?: (surfaceX: number, surfaceY: number) => void
   getCarriedCount?: () => number
   forceEnterTunnel?: number  // Increment to force ant to enter tunnel
@@ -254,7 +254,7 @@ export default function Ant({
           const isInRoom = pathLen >= 15
           
           if (onPickupGrainRef.current) {
-            onPickupGrainRef.current(grainPt.x, grainPt.y)
+            onPickupGrainRef.current(grainPt.x, grainPt.y, antId)
             setCarryingGrain(true)
           }
           setMode('at-grain')

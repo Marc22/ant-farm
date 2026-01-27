@@ -1,26 +1,32 @@
 import React, { useEffect, useRef, useState } from 'react'
 
 type Props = {
+  antId: number
   pathId: string
   initialSpeed?: number // px per second
   color?: string
   scale?: number
-  onDig?: (pt: { x: number; y: number }) => void
+  isDead?: boolean
+  onDig?: (pt: { x: number; y: number }, antId?: number) => void
   resetSignal?: number
   getSurfaceY?: (x: number) => number
   onUpdatePos?: (p: { x: number; y: number; angle: number; legSwing: number; mode?: string }) => void
   onDigEnd?: () => void
-  getTunnelPoints?: () => Array<{ x: number; y: number }>
+  getTunnelPoints?: (skipOvercrowdCheck?: boolean) => Array<{ x: number; y: number }>
   onPickupGrain?: (tunnelX: number, tunnelY: number) => void
   onDepositGrain?: (surfaceX: number, surfaceY: number) => void
   getCarriedCount?: () => number
+  forceEnterTunnel?: number  // Increment to force ant to enter tunnel
+  onLeaveTunnel?: () => void  // Called when ant leaves a tunnel
 }
 
 export default function Ant({ 
+  antId,
   pathId, 
   initialSpeed = 10, 
   color = '#231f20', 
   scale = 0.8, 
+  isDead = false,
   onDig, 
   resetSignal, 
   getSurfaceY, 
@@ -29,7 +35,9 @@ export default function Ant({
   getTunnelPoints,
   onPickupGrain,
   onDepositGrain,
-  getCarriedCount
+  getCarriedCount,
+  forceEnterTunnel,
+  onLeaveTunnel
 }: Props) {
   const [pos, setPos] = useState({ x: 0, y: 0, angle: 0, legSwing: 0 })
   const [isDigging, setIsDigging] = useState(false)
@@ -39,44 +47,73 @@ export default function Ant({
   const dirRef = useRef(1)
   const speedRef = useRef(initialSpeed)
   const lengthRef = useRef(0)
-  const curRef = useRef(0) // current distance along path
+  const curRef = useRef(Math.random() * 100) // Start at random position along path
   const rafRef = useRef<number | null>(null)
   const lastRef = useRef<number | null>(null)
   const diveOffsetRef = useRef(0)
   
   // Tunnel navigation state
   type AntMode = 'surface' | 'descending' | 'at-grain' | 'ascending' | 'depositing'
-  const [mode, setMode] = useState<AntMode>('surface')
+  const [mode, setModeState] = useState<AntMode>('surface')
+  const modeRef = useRef<AntMode>('surface')
+  const setMode = (m: AntMode) => {
+    modeRef.current = m
+    setModeState(m)
+  }
   const tunnelPathRef = useRef<Array<{ x: number; y: number }>>([])
   const tunnelProgressRef = useRef(0)
   const tunnelEntryRef = useRef<{ x: number; y: number } | null>(null)
+  
+  // Use refs to always get the latest callbacks
+  const getTunnelPointsRef = useRef(getTunnelPoints)
+  const onPickupGrainRef = useRef(onPickupGrain)
+  const onDepositGrainRef = useRef(onDepositGrain)
+  const getCarriedCountRef = useRef(getCarriedCount)
+  const onLeaveTunnelRef = useRef(onLeaveTunnel)
+  const isDeadRef = useRef(isDead)
+  
+  useEffect(() => {
+    getTunnelPointsRef.current = getTunnelPoints
+    onPickupGrainRef.current = onPickupGrain
+    onDepositGrainRef.current = onDepositGrain
+    getCarriedCountRef.current = getCarriedCount
+    onLeaveTunnelRef.current = onLeaveTunnel
+    isDeadRef.current = isDead
+  })
 
   useEffect(() => {
     const path = document.getElementById(pathId) as SVGPathElement | null
     if (!path) return
-    const length = path.getTotalLength()
-    lengthRef.current = length
+    lengthRef.current = path.getTotalLength()
 
     // Decision making: check for tunnel opportunities periodically
     const checkForTunnel = () => {
-      if (mode === 'surface' && !isDiggingRef.current && getTunnelPoints) {
-        const tunnels = getTunnelPoints()
-        try { console.debug('[Ant] Checking tunnels:', tunnels.length, 'points available, mode:', mode) } catch(e) {}
-        if (tunnels.length >= 2) {
+      // Don't check for tunnels if dead
+      if (isDead) {
+        setTimeout(checkForTunnel, 2000 + Math.random() * 3000)
+        return
+      }
+      
+      if (modeRef.current === 'surface' && !isDiggingRef.current && getTunnelPointsRef.current) {
+        const tunnels = getTunnelPointsRef.current()
+        try { console.debug('[Ant', antId, '] Checking tunnels:', tunnels ? tunnels.length : 0, 'points available, mode:', modeRef.current) } catch(e) {}
+        if (tunnels && tunnels.length >= 2) {
           // Found a tunnel! Check if we're close to entry
           const surfacePt = path.getPointAtLength(curRef.current)
           const nearbyEntry = tunnels[0] // Use first point as entry
           const distance = Math.abs(nearbyEntry.x - surfacePt.x)
-          try { console.debug('[Ant] Distance to tunnel:', distance, 'px, entry at', nearbyEntry) } catch(e) {}
-          if (distance < 50 && Math.random() < 0.5) {  // INCREASED to 50% chance
-            // Close enough - start descent
+          try { console.debug('[Ant', antId, '] Distance to tunnel:', distance, 'px, entry at', nearbyEntry) } catch(e) {}
+          if (distance < 50 && Math.random() < 0.5) {
             tunnelEntryRef.current = { x: nearbyEntry.x, y: nearbyEntry.y }
             tunnelPathRef.current = tunnels
             tunnelProgressRef.current = 0
             setMode('descending')
             movingRef.current = true
-            try { console.debug('[Ant] Starting tunnel descent with', tunnels.length, 'points!') } catch(e) {}
+            try { console.debug('[Ant', antId, '] Starting tunnel descent with', tunnels.length, 'points!') } catch(e) {}
           }
+        } else if (tunnels && tunnels.length === 0) {
+          // No available tunnels (all overcrowded), continue walking and likely dig a new tunnel
+          try { console.debug('[Ant', antId, '] No available tunnels (overcrowded), will continue walking') } catch(e) {}
         }
       }
       setTimeout(checkForTunnel, 2000 + Math.random() * 3000)
@@ -85,9 +122,14 @@ export default function Ant({
 
     // Random surface behavior
     let stopped = false
-    let justFinishedDigging = false
     const scheduleRandom = () => {
-      if (mode !== 'surface') {
+      // Don't schedule actions if dead
+      if (isDead) {
+        setTimeout(scheduleRandom, 1000)
+        return
+      }
+      
+      if (modeRef.current !== 'surface') {
         setTimeout(scheduleRandom, 1000)
         return
       }
@@ -96,47 +138,54 @@ export default function Ant({
         const pause = 800 + Math.random() * 1700
         stopped = true
         movingRef.current = false
-        setTimeout(() => { stopped = false; movingRef.current = true }, pause)
+        setTimeout(() => { if (!isDeadRef.current) { stopped = false; movingRef.current = true } }, pause)
       } else if (r < 0.28 && onDig) {
         // Start digging a NEW tunnel
         movingRef.current = false
         const pt = path.getPointAtLength(curRef.current)
-        try { console.debug('[Ant] start dig at', pt) } catch (e) {}
-        onDig({ x: pt.x, y: pt.y })
+        try { console.debug('[Ant', antId, '] start dig at', pt) } catch (e) {}
+
+        // Function to poll for the tunnel this ant just started (skip overcrowd check)
+        const checkTunnelReady = () => {
+          console.log('[Ant', antId, '] checkTunnelReady called, modeRef:', modeRef.current)
+          if (!getTunnelPointsRef.current) {
+            console.log('[Ant', antId, '] No getTunnelPointsRef, retrying...')
+            setTimeout(checkTunnelReady, 300)
+            return
+          }
+          // Pass skipOvercrowdCheck=true since this ant just dug the tunnel
+          const tunnels = getTunnelPointsRef.current(true)
+          console.log('[Ant', antId, '] Got tunnels:', tunnels ? tunnels.length : 0, 'points (skipOvercrowdCheck=true)')
+          if (tunnels && tunnels.length >= 2) {
+            console.log('[Ant', antId, '] ENTERING TUNNEL NOW - setting mode to descending')
+            tunnelEntryRef.current = { x: tunnels[0].x, y: tunnels[0].y }
+            tunnelPathRef.current = tunnels
+            tunnelProgressRef.current = 0
+            modeRef.current = 'descending'  // Set ref directly first
+            setMode('descending')           // Then update state
+            if (!isDeadRef.current) movingRef.current = true
+            console.log('[Ant', antId, '] Mode is now:', modeRef.current, 'tunnelPath has', tunnelPathRef.current.length, 'points')
+          } else {
+            // Tunnel not ready yet, check again
+            console.log('[Ant', antId, '] Tunnel not ready, retrying in 300ms')
+            setTimeout(checkTunnelReady, 300)
+          }
+        }
+
+        // Ask AntFarm to start digging and associate tunnel with this ant
+        const res = onDig({ x: pt.x, y: pt.y }, antId)
         setIsDigging(true)
         isDiggingRef.current = true
-        justFinishedDigging = false
+        // Start polling immediately so the ant can enter as soon as segments appear
+        setTimeout(checkTunnelReady, 200)
+
         const digTime = 1200 + Math.random() * 1800
-        setTimeout(() => { 
-          movingRef.current = true
+        setTimeout(() => {
+          if (!isDeadRef.current) movingRef.current = true
           setIsDigging(false)
           isDiggingRef.current = false
-          justFinishedDigging = true  // Mark that we just finished
-          try { console.debug('[Ant] end dig - will enter tunnel when ready') } catch (e) {}
+          try { console.debug('[Ant', antId, '] end dig - will enter tunnel when ready') } catch (e) {}
           if (typeof onDigEnd === 'function') onDigEnd()
-          
-          // Wait for tunnel to be complete before entering
-          const checkTunnelReady = () => {
-            if (getTunnelPoints) {
-              const tunnels = getTunnelPoints()
-              try { console.debug('[Ant] Checking if tunnel ready:', tunnels.length, 'points') } catch(e) {}
-              if (tunnels.length >= 2) {
-                try { console.debug('[Ant] Entering freshly dug tunnel with', tunnels.length, 'points at', new Date().toISOString()) } catch(e) {}
-                tunnelEntryRef.current = { x: tunnels[0].x, y: tunnels[0].y }
-                tunnelPathRef.current = tunnels
-                tunnelProgressRef.current = 0
-                setMode('descending')
-                movingRef.current = true
-                justFinishedDigging = false
-              } else {
-                // Tunnel not ready yet, check again
-                try { console.debug('[Ant] Tunnel not ready, checking again in 300ms') } catch(e) {}
-                setTimeout(checkTunnelReady, 300)
-              }
-            }
-          }
-          // Start checking after a brief delay
-          setTimeout(checkTunnelReady, 500)
         }, digTime)
       }
       if (Math.random() < 0.25) dirRef.current *= -1
@@ -150,16 +199,20 @@ export default function Ant({
       const dt = (now - lastRef.current) / 1000
       lastRef.current = now
 
-      // Debug: log mode every 60 frames when not surface
-      if (typeof window !== 'undefined' && (window as any).frameCount === undefined) (window as any).frameCount = 0
+      // Don't move if dead
+      if (isDead) {
+        return
+      }
+
+      // Debug: log mode every 60 frames
       if (typeof window !== 'undefined') {
-        (window as any).frameCount++
-        if ((window as any).frameCount % 60 === 0 && mode !== 'surface') {
-          try { console.debug('[Ant RAF] mode:', mode, 'tunnelPath length:', tunnelPathRef.current.length, 'progress:', tunnelProgressRef.current) } catch(e) {}
+        (window as any).frameCount = ((window as any).frameCount || 0) + 1
+        if ((window as any).frameCount % 120 === 0) {
+          console.log('[Ant step] mode:', modeRef.current, 'tunnelPath:', tunnelPathRef.current.length, 'progress:', tunnelProgressRef.current.toFixed(2))
         }
       }
 
-      if (mode === 'surface') {
+      if (modeRef.current === 'surface') {
         // Normal surface walking
         if (movingRef.current) {
           curRef.current += dirRef.current * speedRef.current * dt
@@ -177,34 +230,45 @@ export default function Ant({
           setPos({ x: p.x, y: yWithDive, angle, legSwing: swing })
           if (typeof onUpdatePos === 'function') onUpdatePos({ x: p.x, y: yWithDive, angle, legSwing: swing, mode: 'surface' })
         }
-      } else if (mode === 'descending' || mode === 'ascending') {
+      } else if (modeRef.current === 'descending' || modeRef.current === 'ascending') {
         // Navigate along tunnel path
-        const isDescending = mode === 'descending'
+        const isDescending = modeRef.current === 'descending'
         const targetSpeed = initialSpeed * 0.6 // Slower in tunnel
         tunnelProgressRef.current += targetSpeed * dt * (isDescending ? 1 : -1)
-        
+
         const pathLen = tunnelPathRef.current.length
         if (pathLen < 2) {
           try { console.debug('[Ant] Tunnel path too short, returning to surface') } catch(e) {}
           setMode('surface')
           return
         }
-        
+
         const maxProgress = pathLen - 1
         if (isDescending && tunnelProgressRef.current >= maxProgress) {
           // Reached deepest point - pick up grain
           tunnelProgressRef.current = maxProgress
           const grainPt = tunnelPathRef.current[pathLen - 1]
-          try { console.debug('[Ant] Reached deepest point at', grainPt) } catch(e) {}
-          if (onPickupGrain) {
-            onPickupGrain(grainPt.x, grainPt.y)
+          console.log('[Ant] Reached deepest point at', grainPt, 'tunnel length:', pathLen)
+          
+          // Check if we're in a large room (tunnel is long)
+          const isInRoom = pathLen >= 15
+          
+          if (onPickupGrainRef.current) {
+            onPickupGrainRef.current(grainPt.x, grainPt.y)
             setCarryingGrain(true)
           }
           setMode('at-grain')
+          
+          // If in a room, rest longer before ascending
+          const restTime = isInRoom ? 1200 + Math.random() * 800 : 400
+          if (isInRoom) {
+            console.log('[Ant] Resting in room for', Math.round(restTime), 'ms')
+          }
+          
           setTimeout(() => {
-            try { console.debug('[Ant] Starting ascent') } catch(e) {}
+            console.log('[Ant] Starting ascent')
             setMode('ascending')
-          }, 400)
+          }, restTime)
         } else if (!isDescending && tunnelProgressRef.current <= 0) {
           // Back at surface - deposit
           tunnelProgressRef.current = 0
@@ -212,30 +276,62 @@ export default function Ant({
           const surfacePt = tunnelPathRef.current[0]
           try { console.debug('[Ant] Back at surface, depositing') } catch(e) {}
           setTimeout(() => {
-            if (onDepositGrain) {
-              onDepositGrain(surfacePt.x, surfacePt.y)
+            if (onDepositGrainRef.current) {
+              onDepositGrainRef.current(surfacePt.x, surfacePt.y)
               setCarryingGrain(false)
             }
             try { console.debug('[Ant] Deposited grain, checking if more grains in tunnel') } catch(e) {}
-            
+
             // Check if there are more grains in this tunnel
-            const moreGrains = getCarriedCount ? getCarriedCount() : 0
+            const moreGrains = getCarriedCountRef.current ? getCarriedCountRef.current() : 0
             if (moreGrains > 0 && tunnelPathRef.current.length >= 2) {
-              // More grains available - go back down immediately!
-              try { console.debug('[Ant] More grains available (', moreGrains, '), going back down!') } catch(e) {}
-              tunnelProgressRef.current = 0
-              setMode('descending')
-              movingRef.current = true
+              // More grains available - try to get the tunnel path again
+              try { console.debug('[Ant', antId, '] More grains available (', moreGrains, '), checking if tunnel is still available') } catch(e) {}
+              
+              // Re-fetch the tunnel path to check if it's overcrowded
+              if (getTunnelPointsRef.current) {
+                const latestPath = getTunnelPointsRef.current()
+                if (latestPath && latestPath.length >= 2) {
+                  // Tunnel is still available, go back down
+                  try { console.debug('[Ant', antId, '] Tunnel is available, going back down!') } catch(e) {}
+                  tunnelPathRef.current = latestPath
+                  tunnelProgressRef.current = 0
+                  setMode('descending')
+                  movingRef.current = true
+                } else {
+                  // Tunnel is overcrowded or unavailable, leave and walk on surface
+                  try { console.debug('[Ant', antId, '] Tunnel overcrowded! Leaving to find a new spot') } catch(e) {}
+                  setMode('surface')
+                  movingRef.current = true
+                  tunnelPathRef.current = [] // Clear tunnel path
+                  // Notify parent that ant has left the tunnel
+                  if (onLeaveTunnelRef.current) {
+                    onLeaveTunnelRef.current()
+                  }
+                }
+              } else {
+                // Can't check tunnel, return to surface
+                setMode('surface')
+                movingRef.current = true
+                tunnelPathRef.current = []
+                if (onLeaveTunnelRef.current) {
+                  onLeaveTunnelRef.current()
+                }
+              }
             } else {
               // No more grains, return to surface walking
               try { console.debug('[Ant] No more grains, returning to surface walking') } catch(e) {}
               setMode('surface')
               movingRef.current = true
               tunnelPathRef.current = [] // Clear tunnel path
+              // Notify parent that ant has left the tunnel
+              if (onLeaveTunnelRef.current) {
+                onLeaveTunnelRef.current()
+              }
             }
           }, 300)
         }
-        
+
         // Interpolate position along tunnel
         const idx = Math.floor(tunnelProgressRef.current)
         const frac = tunnelProgressRef.current - idx
@@ -246,9 +342,9 @@ export default function Ant({
         const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI * (isDescending ? 1 : -1)
         const swing = Math.sin(now / 160 * (targetSpeed / 8)) * 1.0
         setPos({ x, y, angle, legSwing: swing })
-        if (typeof onUpdatePos === 'function') onUpdatePos({ x, y, angle, legSwing: swing, mode })
+        if (typeof onUpdatePos === 'function') onUpdatePos({ x, y, angle, legSwing: swing, mode: modeRef.current })
       }
-      
+
       rafRef.current = requestAnimationFrame(step)
     }
 
@@ -257,7 +353,7 @@ export default function Ant({
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
     }
-  }, [pathId, initialSpeed, mode])
+  }, [pathId, initialSpeed])
 
   // respond to resetSignal: reset position
   useEffect(() => {
@@ -272,35 +368,83 @@ export default function Ant({
     }
   }, [resetSignal])
 
+  // respond to forceEnterTunnel: immediately enter tunnel if available
+  useEffect(() => {
+    if (isDeadRef.current) return
+    if (typeof forceEnterTunnel === 'number' && forceEnterTunnel > 0) {
+      console.log('[Ant', antId, '] forceEnterTunnel triggered:', forceEnterTunnel)
+      if (getTunnelPointsRef.current) {
+        const tunnels = getTunnelPointsRef.current()
+        console.log('[Ant', antId, '] Force enter - got', tunnels ? tunnels.length : 0, 'tunnel points')
+        if (tunnels && tunnels.length >= 2) {
+          console.log('[Ant', antId, '] FORCE ENTERING TUNNEL')
+          tunnelEntryRef.current = { x: tunnels[0].x, y: tunnels[0].y }
+          tunnelPathRef.current = tunnels
+          tunnelProgressRef.current = 0
+          modeRef.current = 'descending'
+          setMode('descending')
+          movingRef.current = true
+        }
+      }
+    }
+  }, [forceEnterTunnel])
+
   // Render a more side-view ant: three body segments and animated legs
   const { legSwing } = pos
-  const legOffset = legSwing * 2
+  const legOffset = isDead ? 0 : legSwing * 2  // No leg animation when dead
+  const deadScale = isDead ? 0.7 : 1  // Shrivel when dead
+  const deadOpacity = isDead ? 0.5 : 1  // Fade when dead
+  const deadColor = isDead ? '#4a4a4a' : color  // Gray when dead
+  
   return (
-    <g transform={`translate(${pos.x}, ${pos.y}) rotate(${pos.angle}) scale(${scale})`} style={{ pointerEvents: 'none' }}>
-      {/* body segments */}
-      <ellipse cx="-6" cy="0" rx="4" ry="3" fill={color} />
-      <ellipse cx="0" cy="0" rx="5" ry="3.2" fill={color} />
-      <ellipse cx="7" cy="0" rx="3.5" ry="2.5" fill={color} />
-      {/* head/antennae */}
-      <circle cx="11" cy="-1" r="1.6" fill={color} />
-      <line x1="11" y1="-1" x2="14" y2="-4" stroke={color} strokeWidth={0.9} strokeLinecap="round" />
-      <line x1="11" y1="-1" x2="14" y2="1" stroke={color} strokeWidth={0.9} strokeLinecap="round" />
+    <g transform={`translate(${pos.x}, ${pos.y}) rotate(${pos.angle}) scale(${scale * deadScale})`} style={{ pointerEvents: 'none' }} opacity={deadOpacity}>
+      {/* body segments - more shriveled and curled when dead */}
+      <ellipse cx="-6" cy={isDead ? "1" : "0"} rx={isDead ? "3" : "4"} ry={isDead ? "2" : "3"} fill={deadColor} />
+      <ellipse cx="0" cy="0" rx={isDead ? "4" : "5"} ry={isDead ? "2.5" : "3.2"} fill={deadColor} />
+      <ellipse cx="7" cy={isDead ? "-1" : "0"} rx={isDead ? "2.5" : "3.5"} ry={isDead ? "1.8" : "2.5"} fill={deadColor} />
+      {/* head/antennae - droopy when dead */}
+      <circle cx="11" cy="-1" r={isDead ? "1.2" : "1.6"} fill={deadColor} />
+      {!isDead && (
+        <>
+          <line x1="11" y1="-1" x2="14" y2="-4" stroke={deadColor} strokeWidth={0.9} strokeLinecap="round" />
+          <line x1="11" y1="-1" x2="14" y2="1" stroke={deadColor} strokeWidth={0.9} strokeLinecap="round" />
+        </>
+      )}
+      {isDead && (
+        <>
+          <line x1="11" y1="-1" x2="13" y2="1" stroke={deadColor} strokeWidth={0.7} strokeLinecap="round" />
+          <line x1="11" y1="-1" x2="12.5" y2="2" stroke={deadColor} strokeWidth={0.7} strokeLinecap="round" />
+        </>
+      )}
 
-      {/* legs: three on each side, animated by legOffset */}
-      <g stroke={color} strokeWidth={0.9} strokeLinecap="round">
-        <line x1="-2" y1="-3" x2={`${-8 + legOffset}`} y2="-6" />
-        <line x1="-2" y1="3" x2={`${-8 - legOffset}`} y2="6" />
-
-        <line x1="2" y1="-3" x2={`${-1 + legOffset}`} y2="-6" />
-        <line x1="2" y1="3" x2={`${-1 - legOffset}`} y2="6" />
-
-        <line x1="6" y1="-2" x2={`${10 + legOffset}`} y2="-5" />
-        <line x1="6" y1="2" x2={`${10 - legOffset}`} y2="5" />
+      {/* legs: three on each side, animated by legOffset (curled up when dead) */}
+      <g stroke={deadColor} strokeWidth={isDead ? 0.7 : 0.9} strokeLinecap="round">
+        {isDead ? (
+          // Curled up legs when dead
+          <>
+            <line x1="-2" y1="-3" x2="-4" y2="-2" />
+            <line x1="-2" y1="3" x2="-4" y2="2" />
+            <line x1="2" y1="-3" x2="1" y2="-1" />
+            <line x1="2" y1="3" x2="1" y2="1" />
+            <line x1="6" y1="-2" x2="6" y2="0" />
+            <line x1="6" y1="2" x2="6" y2="0" />
+          </>
+        ) : (
+          // Animated legs when alive
+          <>
+            <line x1="-2" y1="-3" x2={`${-8 + legOffset}`} y2="-6" />
+            <line x1="-2" y1="3" x2={`${-8 - legOffset}`} y2="6" />
+            <line x1="2" y1="-3" x2={`${-1 + legOffset}`} y2="-6" />
+            <line x1="2" y1="3" x2={`${-1 - legOffset}`} y2="6" />
+            <line x1="6" y1="-2" x2={`${10 + legOffset}`} y2="-5" />
+            <line x1="6" y1="2" x2={`${10 - legOffset}`} y2="5" />
+          </>
+        )}
       </g>
       
       {/* grain carried in mandibles when carryingGrain is true */}
       {carryingGrain && (
-        <ellipse cx="13" cy="0" rx="2.5" ry="1.5" fill="#caa97a" opacity={0.95} />
+        <ellipse cx="12" cy="-0.5" rx="2" ry="1.2" fill="#caa97a" opacity={0.98} stroke="#b8945a" strokeWidth="0.3" />
       )}
     </g>
   )

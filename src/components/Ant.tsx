@@ -89,7 +89,7 @@ export default function Ant({
     // Decision making: check for tunnel opportunities periodically
     const checkForTunnel = () => {
       // Don't check for tunnels if dead
-      if (isDead) {
+      if (isDeadRef.current) {
         setTimeout(checkForTunnel, 2000 + Math.random() * 3000)
         return
       }
@@ -124,7 +124,7 @@ export default function Ant({
     let stopped = false
     const scheduleRandom = () => {
       // Don't schedule actions if dead
-      if (isDead) {
+      if (isDeadRef.current) {
         setTimeout(scheduleRandom, 1000)
         return
       }
@@ -200,7 +200,7 @@ export default function Ant({
       lastRef.current = now
 
       // Don't move if dead
-      if (isDead) {
+      if (isDeadRef.current) {
         return
       }
 

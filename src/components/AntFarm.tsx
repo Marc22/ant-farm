@@ -31,6 +31,7 @@ export default function AntFarm(): JSX.Element {
   const MAX_ANTS_PER_TUNNEL = 2  // Maximum ants allowed in one tunnel
   const ANT_LIFESPAN_MS = 45000 + Math.random() * 30000  // 45-75 seconds
   const [hudCollapsed, setHudCollapsed] = React.useState(true)
+  const [antsStayAlive, setAntsStayAlive] = React.useState(true)
 
   function handleDig(pt: { x: number; y: number }) {
     try { console.debug('[AntFarm] handleDig called', pt) } catch (e) {}
@@ -134,7 +135,15 @@ export default function AntFarm(): JSX.Element {
   }
 
   // New callbacks for tunnel navigation
-  function getTunnelPoints(antId: number, skipOvercrowdCheck?: boolean): Array<{ x: number; y: number }> {
+  function getTunnelPoints(antIdOrSkip?: number | boolean, skipOvercrowdCheck?: boolean): Array<{ x: number; y: number }> {
+    // Allow calls in two forms for backwards compatibility:
+    // - getTunnelPoints(antId: number)
+    // - getTunnelPoints(skipOvercrowdCheck: boolean)
+    let antId: number | undefined
+    let skip = false
+    if (typeof antIdOrSkip === 'number') antId = antIdOrSkip
+    if (typeof antIdOrSkip === 'boolean') skip = antIdOrSkip
+    if (typeof skipOvercrowdCheck === 'boolean') skip = skipOvercrowdCheck
     // Return a random tunnel path that has grains available and is not overcrowded
     if (tunnelPaths.length === 0) return []
     
@@ -162,37 +171,54 @@ export default function AntFarm(): JSX.Element {
     const chosen = availableTunnels[Math.floor(Math.random() * availableTunnels.length)]
     console.log('[AntFarm] getTunnelPoints returning tunnel', chosen.id, 'with', chosen.points.length, 'points for ant', antId)
     
-    // Assign this ant to the chosen tunnel and update counts
-    const oldTunnelId = antTunnelAssignmentsRef.current.get(antId)
-    if (oldTunnelId !== undefined && oldTunnelId !== chosen.id) {
-      // Remove from old tunnel
-      const oldCount = tunnelAntCountsRef.current.get(oldTunnelId) || 0
-      tunnelAntCountsRef.current.set(oldTunnelId, Math.max(0, oldCount - 1))
+    // Assign this ant to the chosen tunnel and update counts (only if antId provided)
+    if (typeof antId === 'number') {
+      const oldTunnelId = antTunnelAssignmentsRef.current.get(antId)
+      if (oldTunnelId !== undefined && oldTunnelId !== chosen.id) {
+        // Remove from old tunnel
+        const oldCount = tunnelAntCountsRef.current.get(oldTunnelId) || 0
+        tunnelAntCountsRef.current.set(oldTunnelId, Math.max(0, oldCount - 1))
+      }
+      antTunnelAssignmentsRef.current.set(antId, chosen.id)
+      const newCount = (tunnelAntCountsRef.current.get(chosen.id) || 0) + 1
+      tunnelAntCountsRef.current.set(chosen.id, newCount)
+      console.log('[AntFarm] Tunnel', chosen.id, 'now has', newCount, 'ants')
+    } else {
+      const cur = tunnelAntCountsRef.current.get(chosen.id) || 0
+      console.log('[AntFarm] Tunnel', chosen.id, 'now has', cur, 'ants (unchanged)')
     }
-    
-    antTunnelAssignmentsRef.current.set(antId, chosen.id)
-    const newCount = (tunnelAntCountsRef.current.get(chosen.id) || 0) + 1
-    tunnelAntCountsRef.current.set(chosen.id, newCount)
-    console.log('[AntFarm] Tunnel', chosen.id, 'now has', newCount, 'ants')
     
     return chosen.points
   }
 
-  function handlePickupGrain(tunnelX: number, tunnelY: number) {
+  function handlePickupGrain(tunnelX: number, tunnelY: number, antId?: number) {
     // When ant picks up a grain from tunnel, remove one from tunnelGrains and add to carried
-    try { console.debug('[AntFarm] Ant picking up grain near', tunnelX, tunnelY) } catch(e) {}
-    
-    // Find a grain near this position
-    const grainIndex = tunnelGrains.findIndex(g => 
-      Math.abs(g.x - tunnelX) < 20 && Math.abs(g.y - tunnelY) < 20
-    )
-    
+    try { console.debug('[AntFarm] Ant picking up grain near', tunnelX, tunnelY, 'antId:', antId) } catch(e) {}
+
+    // Prefer grains from the ant's assigned tunnel when antId is provided
+    let grainIndex = -1
+    if (typeof antId === 'number') {
+      const assignedTunnel = antTunnelAssignmentsRef.current.get(antId)
+      if (assignedTunnel !== undefined) {
+        grainIndex = tunnelGrains.findIndex(g => g.tunnelId === assignedTunnel && Math.abs(g.x - tunnelX) < 20 && Math.abs(g.y - tunnelY) < 20)
+      }
+    }
+    if (grainIndex === -1) {
+      grainIndex = tunnelGrains.findIndex(g => Math.abs(g.x - tunnelX) < 20 && Math.abs(g.y - tunnelY) < 20)
+    }
+
     if (grainIndex >= 0) {
       const grain = tunnelGrains[grainIndex]
       // remove the specific grain from the tunnel list
       setTunnelGrains(tg => tg.filter((_, i) => i !== grainIndex))
       carriedRef.current.push({ x: grain.x, y: grain.y, r: grain.r })
       try { console.debug('[AntFarm] Picked up grain! Remaining in tunnels:', tunnelGrains.length - 1) } catch(e) {}
+
+      // Only extend tunnels when an actual ant picked the grain (antId provided)
+      if (typeof antId !== 'number') {
+        try { console.debug('[AntFarm] pickup without antId - skipping tunnel extension') } catch(e) {}
+        return
+      }
 
       // EXTEND TUNNEL: Make tunnel longer each time a grain is picked up
       const tunnelId = grain.tunnelId
@@ -202,17 +228,17 @@ export default function AntFarm(): JSX.Element {
         if (latest.points.length >= 2) {
           const lastPt = latest.points[latest.points.length - 1]
           const prevPt = latest.points[latest.points.length - 2]
-          
+
           // Check if tunnel has reached its room threshold
           const roomThreshold = tunnelRoomThresholdsRef.current.get(tunnelId) || 20
           const shouldBuildRoom = latest.points.length === roomThreshold && !tunnelHasRoomRef.current.has(tunnelId)
-          
+
           if (shouldBuildRoom) {
             // BUILD A ROOM: Create a wider chamber at the end
             console.log('[AntFarm] Building a room at tunnel end!')
             const roomRadius = latest.r * 2.5  // Bigger radius for room
             const roomPoints: Array<{ x: number; y: number }> = []
-            
+
             // Create circular room with multiple points
             const numRoomPoints = 8
             for (let i = 0; i < numRoomPoints; i++) {
@@ -220,11 +246,11 @@ export default function AntFarm(): JSX.Element {
               const rx = lastPt.x + Math.cos(angle) * roomRadius * 0.8
               const ry = lastPt.y + Math.sin(angle) * roomRadius * 0.6
               roomPoints.push({ x: rx, y: ry })
-              
+
               // Add holes to create the room chamber
               setHoles(h => [...h, { x: rx, y: ry, r: roomRadius * 0.7 }])
             }
-            
+
             // Add a few grains in the room
             const roomGrainCount = 5 + Math.floor(Math.random() * 5)
             const roomGrains = Array.from({ length: roomGrainCount }, () => ({
@@ -234,12 +260,11 @@ export default function AntFarm(): JSX.Element {
               tunnelId: tunnelId
             }))
             setTunnelGrains(tg => [...tg, ...roomGrains])
-            
+
             // Mark this tunnel as having a room
             tunnelHasRoomRef.current.add(tunnelId)
             console.log('[AntFarm] Room built with', roomGrainCount, 'grains for tunnel', tunnelId)
           } else {
-            // MARK: this branch is the 'regular tunnel extension' case
             // Regular tunnel extension
             const dx = lastPt.x - prevPt.x
             const dy = lastPt.y - prevPt.y
@@ -252,33 +277,23 @@ export default function AntFarm(): JSX.Element {
 
             // Add a hole for the new tunnel segment
             setHoles(h => [...h, { x: newX, y: newY, r: latest.r * 0.9 }])
-            
+
             // BRANCHING: 5% chance to create a fork/branch
             if (Math.random() < 0.05 && latest.points.length >= 8) {
               console.log('[AntFarm] Creating branch from tunnel', tunnelId, 'at point', latest.points.length)
-              // Create a new branch tunnel starting from this point
               const branchId = nextTunnelIdRef.current++
               const branchLength = 5 + Math.floor(Math.random() * 5)
               const branchPoints: Array<{ x: number; y: number }> = [{ x: lastPt.x, y: lastPt.y }]
-              
-              // Branch goes in a different direction
-              const branchAngle = Math.random() * Math.PI * 0.5 - Math.PI * 0.25 // -45 to +45 degrees
-              
+              const branchAngle = Math.random() * Math.PI * 0.5 - Math.PI * 0.25
               for (let j = 1; j <= branchLength; j++) {
                 const bx = lastPt.x + Math.cos(branchAngle) * 8 * j + (Math.random() * 4 - 2)
                 const by = Math.min(sandTop + 160, lastPt.y + Math.abs(Math.sin(branchAngle)) * 8 * j + 4)
                 branchPoints.push({ x: bx, y: by })
                 setHoles(h => [...h, { x: bx, y: by, r: latest.r * 0.8 }])
               }
-              
-              // Add the branch as a new tunnel
               setTunnelPaths(tp => [...tp, { id: branchId, points: branchPoints, r: latest.r * 0.8 }])
-              
-              // Set random room threshold for branch
               const branchRoomThreshold = 15 + Math.floor(Math.random() * 11)
               tunnelRoomThresholdsRef.current.set(branchId, branchRoomThreshold)
-              
-              // Add grains to branch end
               const branchGrainCount = 8 + Math.floor(Math.random() * 7)
               const deepBranchPt = branchPoints[branchPoints.length - 1]
               const branchGrains = Array.from({ length: branchGrainCount }, () => ({
@@ -288,10 +303,8 @@ export default function AntFarm(): JSX.Element {
                 tunnelId: branchId
               }))
               setTunnelGrains(tg => [...tg, ...branchGrains])
-              console.log('[AntFarm] Branch created with', branchGrainCount, 'grains')
             }
-            
-            // Add new grains at the extended end
+
             const newGrainCount = 2 + Math.floor(Math.random() * 3)
             const newGrains = Array.from({ length: newGrainCount }, () => ({
               x: newX + (Math.random() * 6 - 3),
@@ -304,10 +317,9 @@ export default function AntFarm(): JSX.Element {
           }
         }
       }
-    } else {
+    }
       try { console.debug('[AntFarm] No grain found near', tunnelX, tunnelY, '- total grains:', tunnelGrains.length) } catch(e) {}
     }
-  }
 
   function handleDepositGrain(surfaceX: number, surfaceY: number) {
     // When ant deposits a grain at surface, create falling grain with arc
@@ -384,6 +396,7 @@ export default function AntFarm(): JSX.Element {
       const now = Date.now()
       setAnts(currentAnts => currentAnts.map(ant => {
         if (ant.dead) return ant
+        if (antsStayAlive) return ant
         if (!ant.bornAt) return { ...ant, bornAt: now }
         
         const age = now - ant.bornAt
@@ -405,7 +418,14 @@ export default function AntFarm(): JSX.Element {
     }, 1000)  // Check every second
     
     return () => clearInterval(checkDeaths)
-  }, [])
+  }, [antsStayAlive])
+
+  // When "Ants stay alive" is enabled, revive any dead ants immediately
+  React.useEffect(() => {
+    if (antsStayAlive) {
+      setAnts(current => current.map(a => a.dead ? { ...a, dead: false, bornAt: Date.now() } : a))
+    }
+  }, [antsStayAlive])
 
   // heightMap-based grain physics: grains fall and settle into columns to form hills
   const heightMapRef = React.useRef<number[]>(new Array(sandRight - sandLeft + 1).fill(0))
@@ -506,6 +526,12 @@ export default function AntFarm(): JSX.Element {
             </div>
             <div style={{ marginTop: 6 }}>
               <div>Ants: {ants.length} ({ants.filter(a => !a.dead).length} alive)</div>
+              <div style={{ marginTop: 6 }}>
+                <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <input type="checkbox" checked={antsStayAlive} onChange={(e) => setAntsStayAlive((e.target as HTMLInputElement).checked)} />
+                  Ants stay alive
+                </label>
+              </div>
               <div>Ant: {antPos ? `(${Math.round(antPos.x)}, ${Math.round(antPos.y)})` : 'N/A'}</div>
               <div>Mode: <strong>{antMode}</strong></div>
               <div>Active: {isDigging ? 'Digging' : (antMode === 'descending' || antMode === 'ascending' ? 'In Tunnel' : 'Walking')}</div>

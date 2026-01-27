@@ -30,6 +30,7 @@ export default function AntFarm(): JSX.Element {
   const tunnelAntCountsRef = React.useRef<Map<number, number>>(new Map())  // tunnelId -> count of ants
   const MAX_ANTS_PER_TUNNEL = 2  // Maximum ants allowed in one tunnel
   const ANT_LIFESPAN_MS = 45000 + Math.random() * 30000  // 45-75 seconds
+  const [hudCollapsed, setHudCollapsed] = React.useState(true)
 
   function handleDig(pt: { x: number; y: number }) {
     try { console.debug('[AntFarm] handleDig called', pt) } catch (e) {}
@@ -479,50 +480,64 @@ export default function AntFarm(): JSX.Element {
 
   return (
     <div>
-      {/* Debug HUD */}
-      <div style={{ 
-        position: 'absolute', 
-        top: 10, 
-        left: 10, 
-        background: 'rgba(0,0,0,0.7)', 
-        color: '#0f0', 
-        padding: '8px 12px', 
-        fontFamily: 'monospace', 
-        fontSize: '11px', 
-        borderRadius: 4,
-        zIndex: 1000,
-        lineHeight: 1.5
-      }}>
-        <div>Ants: {ants.length} ({ants.filter(a => !a.dead).length} alive)</div>
-        <div>Ant: {antPos ? `(${Math.round(antPos.x)}, ${Math.round(antPos.y)})` : 'N/A'}</div>
-        <div>Mode: <strong>{antMode}</strong></div>
-        <div>Active: {isDigging ? 'Digging' : (antMode === 'descending' || antMode === 'ascending' ? 'In Tunnel' : 'Walking')}</div>
-        <div>Carried: {carriedRef.current.length} grains</div>
-        <div>In Tunnels: {tunnelGrains.length} grains</div>
-        <div>Settled: {grains.filter(g => g.settled).length}/{grains.length}</div>
-        <div>Tunnels: {tunnelPaths.length} paths, {holes.length} holes</div>
-        <div style={{marginTop: 4, borderTop: '1px solid #0f0', paddingTop: 4, fontSize: '10px'}}>
-          <div><strong>Ant Assignments:</strong></div>
-          {ants.map(a => {
-            const tunnelId = antTunnelAssignmentsRef.current.get(a.id)
-            return (
-              <div key={a.id}>
-                Ant{a.id}: {tunnelId !== undefined ? `T${tunnelId}` : 'none'}
+      {/* Debug HUD (collapsed by default) */}
+      <div style={{ position: 'absolute', top: 10, left: 10, zIndex: 1000 }}>
+        {hudCollapsed ? (
+          <div onClick={() => setHudCollapsed(false)} style={{ background: 'rgba(0,0,0,0.7)', color: '#0f0', padding: '6px 10px', fontFamily: 'monospace', fontSize: 11, borderRadius: 4, cursor: 'pointer' }}>
+            Debug: {ants.length} ants ({ants.filter(a => !a.dead).length} alive) ▸
+          </div>
+        ) : (
+          <div style={{ 
+            position: 'relative',
+            background: 'rgba(0,0,0,0.7)', 
+            color: '#0f0', 
+            padding: '8px 12px', 
+            fontFamily: 'monospace', 
+            fontSize: '11px', 
+            borderRadius: 4,
+            lineHeight: 1.5,
+            minWidth: 220
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontWeight: 600 }}>Debug HUD</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button onClick={() => setHudCollapsed(true)} style={{ background: '#222', color: '#0f0', border: '1px solid #0f0', borderRadius: 4, padding: '2px 6px', cursor: 'pointer' }}>Close</button>
               </div>
-            )
-          })}
-        </div>
-        <div style={{marginTop: 4, borderTop: '1px solid #0f0', paddingTop: 4}}>
-          {tunnelPaths.map(tp => {
-            const antCount = tunnelAntCountsRef.current.get(tp.id) || 0
-            const grainCount = tunnelGrains.filter(g => g.tunnelId === tp.id).length
-            return (
-              <div key={tp.id} style={{fontSize: '10px'}}>
-                T{tp.id}: {antCount}/{MAX_ANTS_PER_TUNNEL} ants, {grainCount} grains
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <div>Ants: {ants.length} ({ants.filter(a => !a.dead).length} alive)</div>
+              <div>Ant: {antPos ? `(${Math.round(antPos.x)}, ${Math.round(antPos.y)})` : 'N/A'}</div>
+              <div>Mode: <strong>{antMode}</strong></div>
+              <div>Active: {isDigging ? 'Digging' : (antMode === 'descending' || antMode === 'ascending' ? 'In Tunnel' : 'Walking')}</div>
+              <div>Carried: {carriedRef.current.length} grains</div>
+              <div>In Tunnels: {tunnelGrains.length} grains</div>
+              <div>Settled: {grains.filter(g => g.settled).length}/{grains.length}</div>
+              <div>Tunnels: {tunnelPaths.length} paths, {holes.length} holes</div>
+              <div style={{marginTop: 4, borderTop: '1px solid #0f0', paddingTop: 4, fontSize: '10px'}}>
+                <div><strong>Ant Assignments:</strong></div>
+                {ants.map(a => {
+                  const tunnelId = antTunnelAssignmentsRef.current.get(a.id)
+                  return (
+                    <div key={a.id}>
+                      Ant{a.id}: {tunnelId !== undefined ? `T${tunnelId}` : 'none'}
+                    </div>
+                  )
+                })}
               </div>
-            )
-          })}
-        </div>
+              <div style={{marginTop: 4, borderTop: '1px solid #0f0', paddingTop: 4}}>
+                {tunnelPaths.map(tp => {
+                  const antCount = tunnelAntCountsRef.current.get(tp.id) || 0
+                  const grainCount = tunnelGrains.filter(g => g.tunnelId === tp.id).length
+                  return (
+                    <div key={tp.id} style={{fontSize: '10px'}}>
+                      T{tp.id}: {antCount}/{MAX_ANTS_PER_TUNNEL} ants, {grainCount} grains
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       
       <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>

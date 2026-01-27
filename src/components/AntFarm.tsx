@@ -8,7 +8,7 @@ export default function AntFarm(): JSX.Element {
   const sandRight = 580
 
   const [holes, setHoles] = React.useState<Array<{ x: number; y: number; r: number }>>([])
-  const [tunnelPaths, setTunnelPaths] = React.useState<Array<{ points: Array<{ x: number; y: number }>, r: number }>>([])
+  const [tunnelPaths, setTunnelPaths] = React.useState<Array<{ id: number; points: Array<{ x: number; y: number }>, r: number }>>([])
   const [grains, setGrains] = React.useState<Array<{ x: number; y: number; r: number; yv: number; vx: number; settled?: boolean }>>([])
   const [tunnelGrains, setTunnelGrains] = React.useState<Array<{ x: number; y: number; r: number; tunnelId: number }>>([])
   const carriedRef = React.useRef<Array<{ x: number; y: number; r: number }>>([])
@@ -23,6 +23,7 @@ export default function AntFarm(): JSX.Element {
     { id: 0, speed: 14, color: '#231f20' }  // Starting ant
   ])
   const nextAntIdRef = React.useRef(1)
+  const nextTunnelIdRef = React.useRef(0)
 
   function handleDig(pt: { x: number; y: number }) {
     try { console.debug('[AntFarm] handleDig called', pt) } catch (e) {}
@@ -33,9 +34,16 @@ export default function AntFarm(): JSX.Element {
     const dy = 8 + Math.random() * 6 // vertical per step
     const baseR = 3.5 + Math.random() * 2.5  // REDUCED: smaller radius to prevent combining
 
-    // create a curving tunnel: collect points to create a smooth path
-    const tunnelPoints: Array<{ x: number; y: number }> = [{ x: pt.x, y: pt.y }]
-    let angle = (Math.random() * 2 - 1) * 0.4
+  // create a curving tunnel: we'll create the tunnel entry immediately
+  // so the rendered tunnel appears connected as points are appended.
+  let angle = (Math.random() * 2 - 1) * 0.4
+  // Reserve a stable tunnel id and add initial tunnel path so the mask shows a connected path
+  const tunnelId = nextTunnelIdRef.current++
+  setTunnelPaths(tp => [...tp, { id: tunnelId, points: [{ x: pt.x, y: pt.y }], r: baseR }])
+  // set a room threshold early for this tunnel id
+  const roomThreshold = 15 + Math.floor(Math.random() * 11)
+  tunnelRoomThresholdsRef.current.set(tunnelId, roomThreshold)
+  try { console.debug('[AntFarm] Creating tunnel', tunnelId, 'with initial point, room will form at length', roomThreshold) } catch(e) {}
     
     // Calculate total time needed for tunnel creation
     const totalTunnelTime = (steps - 1) * 200 + 140 + 200 // last step delay + buffer
@@ -51,23 +59,15 @@ export default function AntFarm(): JSX.Element {
           const r = baseR * (0.85 + Math.random() * 0.3)  // REDUCED variation
           // add hole as a point for mask
           setHoles(h => [...h, { x, y, r }])
-          
-          // add point to tunnel path for smooth rendering
-          tunnelPoints.push({ x, y })
+
+          // append point to the existing tunnel path so it stays connected during creation
+          setTunnelPaths(tp => tp.map((t) => t.id === tunnelId ? { ...t, points: [...t.points, { x, y }] } : t))
         }
-        
-        // Add complete tunnel path at the end
-        if (i === steps - 1 && tunnelPoints.length >= 2) {
-          const tunnelId = tunnelPaths.length  // Use current length as ID
-          setTunnelPaths(tp => [...tp, { points: [...tunnelPoints], r: baseR }])
-          
-          // Set random room threshold for this tunnel (15-25 points)
-          const roomThreshold = 15 + Math.floor(Math.random() * 11)
-          tunnelRoomThresholdsRef.current.set(tunnelId, roomThreshold)
-          try { console.debug('[AntFarm] Created tunnel', tunnelId, 'with', tunnelPoints.length, 'points, room will form at length', roomThreshold) } catch(e) {}
-          
-          // Add grains to the tunnel (not carried buffer yet)
-          const deepPoint = tunnelPoints[tunnelPoints.length - 1]
+
+        // At the last step, add the initial grains at the deep end
+        if (i === steps - 1) {
+          // Use the computed coordinates for the deep point (avoid reading tunnelPaths state which may race)
+          const deepPoint = { x, y }
           const grainCount = 15 + Math.floor(Math.random() * 10)
           const newTunnelGrains = new Array(grainCount).fill(0).map(() => ({
             x: deepPoint.x + (Math.random() * 8 - 4),
@@ -123,20 +123,18 @@ export default function AntFarm(): JSX.Element {
     
     // Find tunnels that have grains
     const tunnelIdsWithGrains = new Set(tunnelGrains.map(g => g.tunnelId))
-    const availableTunnels = tunnelPaths
-      .map((t, idx) => ({ tunnel: t, id: idx }))
-      .filter(t => tunnelIdsWithGrains.has(t.id))
-    
+    const availableTunnels = tunnelPaths.filter(t => tunnelIdsWithGrains.has(t.id))
+
     if (availableTunnels.length === 0) {
       // No tunnels with grains, return any tunnel
       const randomIdx = Math.floor(Math.random() * tunnelPaths.length)
       return tunnelPaths[randomIdx].points
     }
-    
+
     // Pick a random tunnel that has grains
     const chosen = availableTunnels[Math.floor(Math.random() * availableTunnels.length)]
-    console.log('[AntFarm] getTunnelPoints returning tunnel', chosen.id, 'with', chosen.tunnel.points.length, 'points')
-    return chosen.tunnel.points
+    console.log('[AntFarm] getTunnelPoints returning tunnel', chosen.id, 'with', chosen.points.length, 'points')
+    return chosen.points
   }
 
   function handlePickupGrain(tunnelX: number, tunnelY: number) {
@@ -150,21 +148,23 @@ export default function AntFarm(): JSX.Element {
     
     if (grainIndex >= 0) {
       const grain = tunnelGrains[grainIndex]
+      // remove the specific grain from the tunnel list
       setTunnelGrains(tg => tg.filter((_, i) => i !== grainIndex))
       carriedRef.current.push({ x: grain.x, y: grain.y, r: grain.r })
       try { console.debug('[AntFarm] Picked up grain! Remaining in tunnels:', tunnelGrains.length - 1) } catch(e) {}
-      
+
       // EXTEND TUNNEL: Make tunnel longer each time a grain is picked up
-      if (tunnelPaths.length > 0) {
-        const latestIdx = tunnelPaths.length - 1
-        const latest = tunnelPaths[latestIdx]
+      const tunnelId = grain.tunnelId
+      const tIdx = tunnelPaths.findIndex(t => t.id === tunnelId)
+      if (tIdx >= 0) {
+        const latest = tunnelPaths[tIdx]
         if (latest.points.length >= 2) {
           const lastPt = latest.points[latest.points.length - 1]
           const prevPt = latest.points[latest.points.length - 2]
           
           // Check if tunnel has reached its room threshold
-          const roomThreshold = tunnelRoomThresholdsRef.current.get(latestIdx) || 20
-          const shouldBuildRoom = latest.points.length === roomThreshold && !tunnelHasRoomRef.current.has(latestIdx)
+          const roomThreshold = tunnelRoomThresholdsRef.current.get(tunnelId) || 20
+          const shouldBuildRoom = latest.points.length === roomThreshold && !tunnelHasRoomRef.current.has(tunnelId)
           
           if (shouldBuildRoom) {
             // BUILD A ROOM: Create a wider chamber at the end
@@ -190,36 +190,33 @@ export default function AntFarm(): JSX.Element {
               x: lastPt.x + (Math.random() * roomRadius * 1.5 - roomRadius * 0.75),
               y: lastPt.y + (Math.random() * roomRadius * 1.2 - roomRadius * 0.6),
               r: 1.6 + Math.random() * 2.4,
-              tunnelId: latestIdx
+              tunnelId: tunnelId
             }))
             setTunnelGrains(tg => [...tg, ...roomGrains])
             
             // Mark this tunnel as having a room
-            tunnelHasRoomRef.current.add(latestIdx)
-            console.log('[AntFarm] Room built with', roomGrainCount, 'grains for tunnel', latestIdx)
+            tunnelHasRoomRef.current.add(tunnelId)
+            console.log('[AntFarm] Room built with', roomGrainCount, 'grains for tunnel', tunnelId)
           } else {
+            // MARK: this branch is the 'regular tunnel extension' case
             // Regular tunnel extension
             const dx = lastPt.x - prevPt.x
             const dy = lastPt.y - prevPt.y
             const newX = lastPt.x + dx * 0.6 + (Math.random() * 6 - 3)
             const newY = Math.min(sandTop + 160, lastPt.y + Math.abs(dy) * 0.6 + 4 + Math.random() * 4)
             const newPt = { x: newX, y: newY }
-            
-            // Add new point to tunnel
-            setTunnelPaths(tp => tp.map((t, i) => 
-              i === latestIdx 
-                ? { ...t, points: [...t.points, newPt] }
-                : t
-            ))
-            
+
+            // Add new point to the correct tunnel (compare by id)
+            setTunnelPaths(tp => tp.map((t) => t.id === tunnelId ? { ...t, points: [...t.points, newPt] } : t))
+
             // Add a hole for the new tunnel segment
             setHoles(h => [...h, { x: newX, y: newY, r: latest.r * 0.9 }])
             
             // BRANCHING: 5% chance to create a fork/branch
             if (Math.random() < 0.05 && latest.points.length >= 8) {
-              console.log('[AntFarm] Creating branch from tunnel', latestIdx, 'at point', latest.points.length)
+              console.log('[AntFarm] Creating branch from tunnel', tunnelId, 'at point', latest.points.length)
               // Create a new branch tunnel starting from this point
-              const branchId = tunnelPaths.length
+              const branchId = nextTunnelIdRef.current++
               const branchLength = 5 + Math.floor(Math.random() * 5)
               const branchPoints: Array<{ x: number; y: number }> = [{ x: lastPt.x, y: lastPt.y }]
               
@@ -234,7 +231,7 @@ export default function AntFarm(): JSX.Element {
               }
               
               // Add the branch as a new tunnel
-              setTunnelPaths(tp => [...tp, { points: branchPoints, r: latest.r * 0.8 }])
+              setTunnelPaths(tp => [...tp, { id: branchId, points: branchPoints, r: latest.r * 0.8 }])
               
               // Set random room threshold for branch
               const branchRoomThreshold = 15 + Math.floor(Math.random() * 11)
@@ -259,7 +256,7 @@ export default function AntFarm(): JSX.Element {
               x: newX + (Math.random() * 6 - 3),
               y: newY + (Math.random() * 6 - 3),
               r: 1.6 + Math.random() * 2.4,
-              tunnelId: latestIdx
+              tunnelId: tunnelId
             }))
             setTunnelGrains(tg => [...tg, ...newGrains])
             try { console.debug('[AntFarm] Extended tunnel by 1 point, added', newGrainCount, 'new grains') } catch(e) {}
@@ -309,6 +306,7 @@ export default function AntFarm(): JSX.Element {
     // Reset to one ant
     setAnts([{ id: 0, speed: 14, color: '#231f20' }])
     nextAntIdRef.current = 1
+    nextTunnelIdRef.current = 0
     tunnelRoomThresholdsRef.current.clear()
     tunnelHasRoomRef.current.clear()
   }

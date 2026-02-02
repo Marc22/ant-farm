@@ -15,6 +15,7 @@ type Props = {
   getTunnelPoints?: (antIdOrSkip?: number | boolean, skipOvercrowdCheck?: boolean) => Array<{ x: number; y: number }>
   onPickupGrain?: (tunnelX: number, tunnelY: number, antId?: number) => void
   onDepositGrain?: (surfaceX: number, surfaceY: number) => void
+  onAscendingWithGrain?: (tunnelX: number, tunnelY: number, antId?: number) => void  // Called when ant starts ascending with grain
   getCarriedCount?: () => number
   forceEnterTunnel?: number  // Increment to force ant to enter tunnel
   onLeaveTunnel?: () => void  // Called when ant leaves a tunnel
@@ -35,6 +36,7 @@ export default function Ant({
   getTunnelPoints,
   onPickupGrain,
   onDepositGrain,
+  onAscendingWithGrain,
   getCarriedCount,
   forceEnterTunnel,
   onLeaveTunnel
@@ -68,6 +70,7 @@ export default function Ant({
   const getTunnelPointsRef = useRef(getTunnelPoints)
   const onPickupGrainRef = useRef(onPickupGrain)
   const onDepositGrainRef = useRef(onDepositGrain)
+  const onAscendingWithGrainRef = useRef(onAscendingWithGrain)
   const getCarriedCountRef = useRef(getCarriedCount)
   const onLeaveTunnelRef = useRef(onLeaveTunnel)
   const isDeadRef = useRef(isDead)
@@ -76,6 +79,7 @@ export default function Ant({
     getTunnelPointsRef.current = getTunnelPoints
     onPickupGrainRef.current = onPickupGrain
     onDepositGrainRef.current = onDepositGrain
+    onAscendingWithGrainRef.current = onAscendingWithGrain
     getCarriedCountRef.current = getCarriedCount
     onLeaveTunnelRef.current = onLeaveTunnel
     isDeadRef.current = isDead
@@ -153,10 +157,11 @@ export default function Ant({
             setTimeout(checkTunnelReady, 300)
             return
           }
-          // Pass skipOvercrowdCheck=true since this ant just dug the tunnel
-          const tunnels = getTunnelPointsRef.current(true)
-          console.log('[Ant', antId, '] Got tunnels:', tunnels ? tunnels.length : 0, 'points (skipOvercrowdCheck=true)')
-          if (tunnels && tunnels.length >= 2) {
+          // Pass antId so getTunnelPoints returns the ant's assigned tunnel
+          const tunnels = getTunnelPointsRef.current(antId)
+          console.log('[Ant', antId, '] Got tunnels:', tunnels ? tunnels.length : 0, 'points')
+          // Start descending immediately with even just 1 point - ant will dig as it goes
+          if (tunnels && tunnels.length >= 1) {
             console.log('[Ant', antId, '] ENTERING TUNNEL NOW - setting mode to descending')
             tunnelEntryRef.current = { x: tunnels[0].x, y: tunnels[0].y }
             tunnelPathRef.current = tunnels
@@ -234,18 +239,51 @@ export default function Ant({
         // Navigate along tunnel path
         const isDescending = modeRef.current === 'descending'
         const targetSpeed = initialSpeed * 0.6 // Slower in tunnel
-        tunnelProgressRef.current += targetSpeed * dt * (isDescending ? 1 : -1)
+        
+        // If descending, trigger tunnel extension FIRST so path grows ahead of ant
+        if (isDescending && typeof (window as any).handleAntDiggingProgress === 'function') {
+          (window as any).handleAntDiggingProgress(antId, tunnelProgressRef.current + 2)
+          // Refresh our tunnel path from the source to get newly added points
+          if (getTunnelPointsRef.current) {
+            const updatedPath = getTunnelPointsRef.current(antId)
+            if (updatedPath && updatedPath.length > tunnelPathRef.current.length) {
+              tunnelPathRef.current = updatedPath
+            }
+          }
+        }
 
         const pathLen = tunnelPathRef.current.length
+        
+        // If path is too short, don't move but keep animating
         if (pathLen < 2) {
-          try { console.debug('[Ant] Tunnel path too short, returning to surface') } catch(e) {}
-          setMode('surface')
+          // Track how long we've been waiting
+          const waitKey = `ant_${antId}_wait`
+          const waitStart = (window as any)[waitKey] || now
+          if (!(window as any)[waitKey]) (window as any)[waitKey] = now
+          
+          // If waiting too long (3 seconds), return to surface
+          if (now - waitStart > 3000) {
+            console.log('[Ant', antId, '] Stuck waiting for tunnel, returning to surface')
+            delete (window as any)[waitKey]
+            setMode('surface')
+            movingRef.current = true
+            tunnelPathRef.current = []
+            if (onLeaveTunnelRef.current) onLeaveTunnelRef.current()
+          }
+          
+          rafRef.current = requestAnimationFrame(step)
           return
         }
+        
+        // Clear wait timer since we have enough path
+        delete (window as any)[`ant_${antId}_wait`]
+        
+        // Now safe to advance progress
+        tunnelProgressRef.current += targetSpeed * dt * (isDescending ? 1 : -1)
 
         const maxProgress = pathLen - 1
         if (isDescending && tunnelProgressRef.current >= maxProgress) {
-          // Reached deepest point - pick up grain
+          // Reached deepest point - pick up grain (but don't extend tunnel yet)
           tunnelProgressRef.current = maxProgress
           const grainPt = tunnelPathRef.current[pathLen - 1]
           console.log('[Ant] Reached deepest point at', grainPt, 'tunnel length:', pathLen)
@@ -253,6 +291,7 @@ export default function Ant({
           // Check if we're in a large room (tunnel is long)
           const isInRoom = pathLen >= 15
           
+          // Just pick up the grain without extending the tunnel
           if (onPickupGrainRef.current) {
             onPickupGrainRef.current(grainPt.x, grainPt.y, antId)
             setCarryingGrain(true)
@@ -266,7 +305,11 @@ export default function Ant({
           }
           
           setTimeout(() => {
-            console.log('[Ant] Starting ascent')
+            console.log('[Ant] Starting ascent - NOW extend tunnel')
+            // Trigger tunnel extension when ant starts ascending with grain
+            if (onAscendingWithGrainRef.current) {
+              onAscendingWithGrainRef.current(grainPt.x, grainPt.y, antId)
+            }
             setMode('ascending')
           }, restTime)
         } else if (!isDescending && tunnelProgressRef.current <= 0) {
@@ -282,45 +325,20 @@ export default function Ant({
             }
             try { console.debug('[Ant] Deposited grain, checking if more grains in tunnel') } catch(e) {}
 
-            // Check if there are more grains in this tunnel
+            // Check if there are more grains in THIS SAME tunnel (prevent teleportation)
             const moreGrains = getCarriedCountRef.current ? getCarriedCountRef.current() : 0
             if (moreGrains > 0 && tunnelPathRef.current.length >= 2) {
-              // More grains available - try to get the tunnel path again
-              try { console.debug('[Ant', antId, '] More grains available (', moreGrains, '), checking if tunnel is still available') } catch(e) {}
+              // More grains available - stay at the same tunnel entry point
+              try { console.debug('[Ant', antId, '] More grains available (', moreGrains, '), going back down the SAME tunnel') } catch(e) {}
               
-              // Re-fetch the tunnel path to check if it's overcrowded
-              if (getTunnelPointsRef.current) {
-                const latestPath = getTunnelPointsRef.current()
-                if (latestPath && latestPath.length >= 2) {
-                  // Tunnel is still available, go back down
-                  try { console.debug('[Ant', antId, '] Tunnel is available, going back down!') } catch(e) {}
-                  tunnelPathRef.current = latestPath
-                  tunnelProgressRef.current = 0
-                  setMode('descending')
-                  movingRef.current = true
-                } else {
-                  // Tunnel is overcrowded or unavailable, leave and walk on surface
-                  try { console.debug('[Ant', antId, '] Tunnel overcrowded! Leaving to find a new spot') } catch(e) {}
-                  setMode('surface')
-                  movingRef.current = true
-                  tunnelPathRef.current = [] // Clear tunnel path
-                  // Notify parent that ant has left the tunnel
-                  if (onLeaveTunnelRef.current) {
-                    onLeaveTunnelRef.current()
-                  }
-                }
-              } else {
-                // Can't check tunnel, return to surface
-                setMode('surface')
-                movingRef.current = true
-                tunnelPathRef.current = []
-                if (onLeaveTunnelRef.current) {
-                  onLeaveTunnelRef.current()
-                }
-              }
+              // Keep the same tunnel path and just reset progress to go back down
+              // Don't fetch a new tunnel - this prevents teleportation
+              tunnelProgressRef.current = 0
+              setMode('descending')
+              movingRef.current = true
             } else {
-              // No more grains, return to surface walking
-              try { console.debug('[Ant] No more grains, returning to surface walking') } catch(e) {}
+              // No more grains or tunnel no longer valid, return to surface walking
+              try { console.debug('[Ant] No more grains or tunnel invalid, returning to surface walking') } catch(e) {}
               setMode('surface')
               movingRef.current = true
               tunnelPathRef.current = [] // Clear tunnel path

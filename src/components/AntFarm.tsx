@@ -44,6 +44,12 @@ export default function AntFarm(): JSX.Element {
     startPt: { x: number, y: number }
   }>>(new Map())
 
+  // Helper to add a hole only if it's within the sand bounds
+  function addHoleIfInBounds(x: number, y: number, r: number) {
+    if (x > sandLeft + 4 && x < sandRight - 4 && y > sandTop + 2) {
+      setHoles(h => [...h, { x, y, r }])
+    }
+  }
   function handleDig(pt: { x: number; y: number }) {
     try { console.debug('[AntFarm] handleDig called', pt) } catch (e) {}
     // Start a short diagonal tunnel from the surface point into the sand
@@ -55,7 +61,10 @@ export default function AntFarm(): JSX.Element {
 
     // Reserve a stable tunnel id and create ONLY the entry point
     const tunnelId = nextTunnelIdRef.current++
-    setTunnelPaths(tp => [...tp, { id: tunnelId, points: [{ x: pt.x, y: pt.y }], r: baseR }])
+    // Clamp entry point to sand bounds so tunnels can't start outside the border
+    const startX = Math.max(sandLeft + 4, Math.min(sandRight - 4, pt.x))
+    const startY = Math.max(sandTop + 2, pt.y)
+    setTunnelPaths(tp => [...tp, { id: tunnelId, points: [{ x: startX, y: startY }], r: baseR }])
     
     // Store digging parameters so ant can extend the tunnel as it descends
     tunnelDigParamsRef.current.set(tunnelId, {
@@ -65,7 +74,7 @@ export default function AntFarm(): JSX.Element {
       baseR,
       steps,
       currentStep: 0,
-      startPt: pt
+      startPt: { x: startX, y: startY }
     })
     
     const roomThreshold = 15 + Math.floor(Math.random() * 11)
@@ -102,7 +111,7 @@ export default function AntFarm(): JSX.Element {
       
       if (x > sandLeft + 4 && x < sandRight - 4 && y > sandTop + 2) {
         const r = digParams.baseR * (0.85 + Math.random() * 0.3)
-        setHoles(h => [...h, { x, y, r }])
+        addHoleIfInBounds(x, y, r)
         setTunnelPaths(tp => tp.map((t) => t.id === tunnelId ? { ...t, points: [...t.points, { x, y }] } : t))
       }
       
@@ -312,8 +321,8 @@ export default function AntFarm(): JSX.Element {
           const rx = lastPt.x + Math.cos(angle) * roomRadius * 0.8
           const ry = lastPt.y + Math.sin(angle) * roomRadius * 0.6
 
-          // Add hole for this room segment
-          setHoles(h => [...h, { x: rx, y: ry, r: roomRadius * 0.7 }])
+          // Add hole for this room segment (only if in bounds)
+          addHoleIfInBounds(rx, ry, roomRadius * 0.7)
           
           // Add 1 grain per segment
           const grain = {
@@ -343,13 +352,17 @@ export default function AntFarm(): JSX.Element {
         const dy = lastPt.y - prevPt.y
         const newX = lastPt.x + dx * 0.6 + (Math.random() * 6 - 3)
         const newY = Math.min(sandTop + 160, lastPt.y + Math.abs(dy) * 0.6 + 4 + Math.random() * 4)
-        const newPt = { x: newX, y: newY }
+        // Only extend if the new point is within bounds
+        if (newX > sandLeft + 4 && newX < sandRight - 4 && newY > sandTop + 2) {
+          const newPt = { x: newX, y: newY }
+          // Add new point to the correct tunnel (compare by id)
+          setTunnelPaths(tp => tp.map((t) => t.id === tunnelId ? { ...t, points: [...t.points, newPt] } : t))
 
-        // Add new point to the correct tunnel (compare by id)
-        setTunnelPaths(tp => tp.map((t) => t.id === tunnelId ? { ...t, points: [...t.points, newPt] } : t))
+          // Add a hole for the new tunnel segment
+          addHoleIfInBounds(newX, newY, latest.r * 0.9)
 
-        // Add a hole for the new tunnel segment
-        setHoles(h => [...h, { x: newX, y: newY, r: latest.r * 0.9 }])
+          // BRANCHING... (branch creation will run below as before)
+        }
 
         // BRANCHING: 5% chance to create a fork/branch
         if (Math.random() < 0.05 && latest.points.length >= 8) {
@@ -361,21 +374,28 @@ export default function AntFarm(): JSX.Element {
           for (let j = 1; j <= branchLength; j++) {
             const bx = lastPt.x + Math.cos(branchAngle) * 8 * j + (Math.random() * 4 - 2)
             const by = Math.min(sandTop + 160, lastPt.y + Math.abs(Math.sin(branchAngle)) * 8 * j + 4)
-            branchPoints.push({ x: bx, y: by })
-            setHoles(h => [...h, { x: bx, y: by, r: latest.r * 0.8 }])
+            // Only include branch points that are in bounds
+            if (bx > sandLeft + 4 && bx < sandRight - 4 && by > sandTop + 2) {
+              branchPoints.push({ x: bx, y: by })
+              addHoleIfInBounds(bx, by, latest.r * 0.8)
+            }
           }
-          setTunnelPaths(tp => [...tp, { id: branchId, points: branchPoints, r: latest.r * 0.8 }])
-          const branchRoomThreshold = 15 + Math.floor(Math.random() * 11)
-          tunnelRoomThresholdsRef.current.set(branchId, branchRoomThreshold)
-          const branchGrainCount = 8 + Math.floor(Math.random() * 7)
-          const deepBranchPt = branchPoints[branchPoints.length - 1]
-          const branchGrains = Array.from({ length: branchGrainCount }, () => ({
-            x: deepBranchPt.x + (Math.random() * 6 - 3),
-            y: deepBranchPt.y + (Math.random() * 6 - 3),
-            r: 1.6 + Math.random() * 2.4,
-            tunnelId: branchId
-          }))
-          setTunnelGrains(tg => [...tg, ...branchGrains])
+          // Only add the branch tunnel if it has at least one point (besides the origin)
+          const filteredBranchPoints = branchPoints.filter(p => p.x > sandLeft + 4 && p.x < sandRight - 4 && p.y > sandTop + 2)
+          if (filteredBranchPoints.length > 0) {
+            setTunnelPaths(tp => [...tp, { id: branchId, points: filteredBranchPoints, r: latest.r * 0.8 }])
+            const branchRoomThreshold = 15 + Math.floor(Math.random() * 11)
+            tunnelRoomThresholdsRef.current.set(branchId, branchRoomThreshold)
+            const branchGrainCount = 8 + Math.floor(Math.random() * 7)
+            const deepBranchPt = filteredBranchPoints[filteredBranchPoints.length - 1]
+            const branchGrains = Array.from({ length: branchGrainCount }, () => ({
+              x: deepBranchPt.x + (Math.random() * 6 - 3),
+              y: deepBranchPt.y + (Math.random() * 6 - 3),
+              r: 1.6 + Math.random() * 2.4,
+              tunnelId: branchId
+            }))
+            setTunnelGrains(tg => [...tg, ...branchGrains])
+          }
         }
 
         const newGrainCount = 2 + Math.floor(Math.random() * 3)

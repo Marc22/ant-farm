@@ -15,7 +15,7 @@ Build for production:
 npm run build
 ```
 
-Demo site here
+View the demo site at:
 
 ```powershell
 https://marc22.github.io/ant-farm/
